@@ -1,0 +1,2 @@
+C:\Visual Studio\Projects\ServerApp\bin\Release\net8.0\linux-x64\publish\ServerApp.pdb
+C:\Visual Studio\Projects\ServerApp\bin\Release\net8.0\linux-x64\publish\ServerApp
