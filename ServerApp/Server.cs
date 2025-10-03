@@ -5,15 +5,24 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.Net.WebSockets;
 
 namespace Client_Server;
 class Server
 {
     private static Socket listener;
+    private static ConcurrentDictionary<int, Socket> clients = new();
+    private static int nextID = 0;
 
-    static void Main(string[] args)
+    //static void Main(string[] args)
+    //{
+    //    ExecuteServer();
+    //}
+
+    public static async Task Main(string[] args)
     {
-        ExecuteServer();
+        await ExecuteServerAsync(11111);
     }
 
     static void ExecuteServer()
@@ -83,28 +92,8 @@ class Server
 
     static void ProcessPacket(ref Socket clientSocket, ref bool connected)
     {
-        /*
-         * Packet incoming = new Packet();
-         * var status = PacketIO.ReceivePacket(clientSocket, ref incoming);
-         * if (status == ReceiveStatus.Ok)
-         * {
-         *  do stuff
-         * }
-         * else if (status == ReceiveStatus.Disconnected)
-         * {
-         * force quit
-         * }
-         * else if (status == ReceiveStatus.Error)
-         * {
-         * output an error occured receiving the last packet
-         * }
-         * 
-         * */
         Packet incoming = new Packet();
         var status = PacketIO.ReceivePacket(clientSocket, ref incoming);
-        var clientID = incoming.ClientID;
-        var headers = incoming.Headers;
-        var text = Encoding.UTF8.GetString(incoming.Payload);
 
         if (status == PacketStatus.Disconnected)
         {
@@ -123,6 +112,9 @@ class Server
             return;
         }
         //If we reach here, status is PacketStatus.Ok
+        var clientID = incoming.ClientID;
+        var headers = incoming.Headers;
+        var text = Encoding.UTF8.GetString(incoming.Payload);
         int commandStatus = ReadCommand(text);
         if (commandStatus == 2)
         {
@@ -168,6 +160,129 @@ class Server
                 return 1;
             default:
                 return 0;
+        }
+    }
+
+    public static async Task ExecuteServerAsync(int port)
+    {
+        InitListener();
+        _ = Task.Run(() =>
+        {
+            Console.ReadLine();
+            try { listener.Close(); } catch { }
+        });
+
+        while (true)
+        {
+            Socket client = null;
+            try
+            {
+                Console.WriteLine("Awaiting connection...");
+                client = await listener.AcceptAsync();
+                client.NoDelay = true;
+                int id = Interlocked.Increment(ref nextID);
+                clients[id] = client;
+                Console.WriteLine($"Client with ID {id} connected using IP {client.RemoteEndPoint.ToString()}.");
+                HandleClientAsync(id);
+            }
+            catch (OperationCanceledException e) 
+            {
+                Console.WriteLine(e.ToString());
+                break; 
+            }
+
+        }
+    }
+
+    private static async Task<bool> ProcessPacketAsync(int id)
+    {
+        Socket client = clients[id];
+        Packet incoming = new Packet();
+        var status = await PacketIO.ReceivePacketAsync_Compat(client, p => incoming = p);
+
+        if (status == PacketStatus.Disconnected)
+        {
+            Console.WriteLine($"Client {id} forcibly disconnected");
+            client.Shutdown(SocketShutdown.Both);
+            client.Close();
+            return false;
+        }
+        else if (status == PacketStatus.Error)
+        {
+            Console.WriteLine("An error occured trying to receive the last packet. Closing connection.");
+            client.Shutdown(SocketShutdown.Both);
+            client.Close();
+            return false;
+        }
+        //if we reach here status is Ok
+        var clientID = incoming.ClientID;
+        var headers = incoming.Headers;
+        var text = Encoding.UTF8.GetString(incoming.Payload);
+        int commandStatus = ReadCommand(text);
+
+        if (commandStatus == 2)
+        {
+            client.Shutdown(SocketShutdown.Both);
+            client.Close();
+        }
+        else if (commandStatus == 1)
+        {
+            return true;
+        }
+        else if (commandStatus == 0)
+        {
+            Console.WriteLine($"Received Message from {clientID}: {text}");
+            Packet reply = new Packet
+            {
+                ClientID = "Server",
+                Headers = new Dictionary<string, string> { { "Type", "Ack" } },
+                Payload = Encoding.ASCII.GetBytes($"Ack: {text}")
+            };
+            PacketIO.SendPacketAsync(client, reply);
+            return true;
+        }
+        else
+        {
+            Console.WriteLine($"Unexpected return value from ReadCommand: {commandStatus}");
+            return false;
+        }
+        return false;
+    }
+
+    private static async Task HandleClientAsync(int id)
+    {
+        Console.WriteLine($"Client #{id} handler started.");
+        while (true)
+        {
+            bool keepAlive = await ProcessPacketAsync(id);
+            if (!keepAlive) break;
+        }
+    }
+
+    private static async Task SendPacketAsync(int id)
+    {
+        Socket client = clients[id];
+    }
+
+    public static async Task BroadcastAsync(byte[] data, int? excludeID = null)
+    {
+        var dead = new List<int>();
+        foreach (var client in clients)
+        {
+            if (excludeID.HasValue && client.Key == excludeID.Value) continue;
+            try
+            {
+                await client.Value.SendAsync(data, SocketFlags.None);
+            }
+            catch
+            {
+                dead.Add(client.Key);
+            }
+        }
+
+        foreach (var id in dead)
+        {
+            clients.TryRemove(id, out _);
         }
     }
 }
