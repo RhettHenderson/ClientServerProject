@@ -32,35 +32,9 @@ class Server
                     clientSocket = WaitForConnection();
                     connected = true;
                 }
-                var incoming = PacketIO.ReceivePacket(clientSocket);
-                var clientID = incoming.ClientID;
-                var headers = incoming.Headers;
-                var text = Encoding.UTF8.GetString(incoming.Payload);
-                if (text.Equals("\\fq"))
-                {
-                    Console.WriteLine("Client forcibly disconnected");
-                    clientSocket.Shutdown(SocketShutdown.Both);
-                    clientSocket.Close();
-                    connected = false;
-                }
-                else if (text.Equals("\\q"))
-                {
-                    Console.WriteLine("Client requested to end connection");
-                    clientSocket.Shutdown(SocketShutdown.Both);
-                    clientSocket.Close();
-                    connected = false;
-                }
-                else
-                {
-                    Console.WriteLine($"Received Message from {clientID}: {text}");
-                    Packet reply = new Packet
-                    {
-                        ClientID = "Server",
-                        Headers = new Dictionary<string, string> { { "Type", "Ack" } },
-                        Payload = Encoding.ASCII.GetBytes($"Ack: {text}")
-                    };
-                    PacketIO.SendPacket(clientSocket, reply);
-                }
+
+                //Processes the packet and modifies the original values of clientSocket and connected
+                ProcessPacket(ref clientSocket, ref connected);
             }
         }
         catch (Exception e)
@@ -107,38 +81,93 @@ class Server
         return clientSocket;
     }
 
-    //Original read method, only accepts bytes
-    static string ReadPacket(Socket clientSocket)
+    static void ProcessPacket(ref Socket clientSocket, ref bool connected)
     {
-        byte[] bytes = new byte[1024];
-        var sb = new StringBuilder();
-        while (true)
-        {
-            int numByte;
-            try
-            {
-                numByte = clientSocket.Receive(bytes);
-            }
-            catch (SocketException)
-            {
-                return "\\fq";
-            }
-            catch (ObjectDisposedException)
-            {
-                return "\\fq";
-            }
+        /*
+         * Packet incoming = new Packet();
+         * var status = PacketIO.ReceivePacket(clientSocket, ref incoming);
+         * if (status == ReceiveStatus.Ok)
+         * {
+         *  do stuff
+         * }
+         * else if (status == ReceiveStatus.Disconnected)
+         * {
+         * force quit
+         * }
+         * else if (status == ReceiveStatus.Error)
+         * {
+         * output an error occured receiving the last packet
+         * }
+         * 
+         * */
+        Packet incoming = new Packet();
+        var status = PacketIO.ReceivePacket(clientSocket, ref incoming);
+        var clientID = incoming.ClientID;
+        var headers = incoming.Headers;
+        var text = Encoding.UTF8.GetString(incoming.Payload);
 
-            //fq signifies force quit, q signifies quit
-            if (numByte == 0)
-            {
-                return "\\fq";
-            }
-            sb.Append(Encoding.ASCII.GetString(bytes, 0, numByte));
-            if (sb.ToString().Contains("<EOF>"))
-            {
-                break;
-            }
+        if (status == PacketStatus.Disconnected)
+        {
+            Console.WriteLine("Client forcibly disconnected");
+            clientSocket.Shutdown(SocketShutdown.Both);
+            clientSocket.Close();
+            connected = false;
+            return;
         }
-        return sb.ToString().Replace("<EOF>", "");
+        else if (status == PacketStatus.Error)
+        {
+            Console.WriteLine("An error occured trying to receive the last packet. Closing connection.");
+            clientSocket.Shutdown(SocketShutdown.Both);
+            clientSocket.Close();
+            connected = false;
+            return;
+        }
+        //If we reach here, status is PacketStatus.Ok
+        int commandStatus = ReadCommand(text);
+        if (commandStatus == 2)
+        {
+            clientSocket.Shutdown(SocketShutdown.Both);
+            clientSocket.Close();
+            connected = false;
+        }
+        else if (commandStatus == 1)
+        {
+            return;
+        }
+        else if (commandStatus == 0)
+        {
+            Console.WriteLine($"Received Message from {clientID}: {text}");
+            Packet reply = new Packet
+            {
+                ClientID = "Server",
+                Headers = new Dictionary<string, string> { { "Type", "Ack" } },
+                Payload = Encoding.ASCII.GetBytes($"Ack: {text}")
+            };
+            PacketIO.SendPacket(clientSocket, reply);
+        }
+        else
+        {
+            Console.WriteLine($"Unexpected return value from ReadCommand: {commandStatus}");
+            return;
+        }
+    }
+
+    //Returns 0 if no command, 1 if command exists and nothing needs to be done, 2 if command exists and connection should be closed
+    static int ReadCommand(string text)
+    {
+        switch (text)
+        {
+            case "\\q":
+                Console.WriteLine("Client requested to end connection");
+                return 2;
+            case "\\info":
+                Console.WriteLine("Client attempted the 'info' command, which hasn't been implemented yet");
+                return 1;
+            case "\\help":
+                Console.WriteLine("Client attempted the 'help' command, which hasn't been implemented yet");
+                return 1;
+            default:
+                return 0;
+        }
     }
 }

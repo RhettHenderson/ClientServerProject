@@ -53,29 +53,17 @@ class Client
                 while (true)
                 {
                     string message = Console.ReadLine();
-                    //if (message == "\\q")
-                    //{
-                    //    byte[] terminateMessage = Encoding.ASCII.GetBytes("\\q<EOF>");
-                    //    int terminateSent = sender.Send(terminateMessage);
-                    //    break;
-                    //}
-                    //message += "<EOF>";
-                    //byte[] messageSent = Encoding.ASCII.GetBytes(message);
-                    //int byteSent = sender.Send(messageSent);
                     Packet pkt = new Packet
                     {
                         ClientID = "Rhett's PC Client",
                         Headers = new Dictionary<string, string>
                         {
-                            { "Type", "Chat" }
+                            { "Type", "Message" }
                         },
                         Payload = Encoding.UTF8.GetBytes(message)
                     };
                     PacketIO.SendPacket(sender, pkt);
 
-                    //byte[] messageReceived = new byte[1024];
-
-                    //int byteRecv = sender.Receive(messageReceived);
                     var response = PacketIO.ReceivePacket(sender);
                     var text = Encoding.UTF8.GetString(response.Payload);
                     Console.WriteLine("Message from Server -> {0} < -", text);

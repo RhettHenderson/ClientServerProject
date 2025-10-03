@@ -9,6 +9,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading;
 using System.Buffers.Binary;
+using System.Diagnostics;
 
 namespace Client_Server;
 
@@ -44,30 +45,55 @@ public static class PacketIO
         }
     }
 
-    public static Packet ReceivePacket(Socket socket)
+    public static PacketStatus ReceivePacket(Socket socket, ref Packet packet)
     {
         Span<byte> lenBuf = stackalloc byte[4];
-        ReceiveExactly(socket, lenBuf);
+        int received = ReceiveExactly(socket, lenBuf);
         int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
-        if (len < 0 || len > 16000000)
+        if (received == 1)
         {
-            throw new InvalidOperationException($"Invalid packet length: {len}");
+            return PacketStatus.Disconnected;
         }
-
+        else if (len < 0 || len > 16000000)
+        {
+            return PacketStatus.Error;
+        }
         //read body
         byte[] body = new byte[len];
-        ReceiveExactly(socket, body);
-        return Deserialize(body);
+        received = ReceiveExactly(socket, body);
+        if (received == 1)
+        {
+            return PacketStatus.Disconnected;
+        }
+        packet = Deserialize(body);
+        return PacketStatus.Ok;
+
     }
 
-    static void ReceiveExactly(Socket socket, Span<byte> buffer)
+    static int ReceiveExactly(Socket socket, Span<byte> buffer)
     {
         int received = 0;
+        int r;
         while (received < buffer.Length)
         {
-            int r = socket.Receive(buffer.Slice(received));
-            if (r == 0) throw new EndOfStreamException();
+            try
+            {
+                r = socket.Receive(buffer.Slice(received));
+            }
+            catch (SocketException)
+            {
+                return 1;
+            }
+            if (r == 0) return 1;
             received += r;
         }
+        return 0;
     }
+}
+
+public enum PacketStatus
+{
+    Ok,
+    Disconnected,
+    Error
 }

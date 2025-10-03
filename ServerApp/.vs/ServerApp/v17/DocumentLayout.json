@@ -1,13 +1,13 @@
 {
   "Version": 1,
-  "WorkspaceRootPath": "C:\\Visual Studio\\Projects\\ServerApp\\",
+  "WorkspaceRootPath": "C:\\Visual Studio\\Projects\\ClientServerProject\\ServerApp\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{2E945596-87B9-421A-BD28-2BEBA77FED38}|ServerApp.csproj|c:\\visual studio\\projects\\serverapp\\packetio.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "AbsoluteMoniker": "D:0:0:{2E945596-87B9-421A-BD28-2BEBA77FED38}|ServerApp.csproj|c:\\visual studio\\projects\\clientserverproject\\serverapp\\packetio.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
       "RelativeMoniker": "D:0:0:{2E945596-87B9-421A-BD28-2BEBA77FED38}|ServerApp.csproj|solutionrelative:packetio.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{2E945596-87B9-421A-BD28-2BEBA77FED38}|ServerApp.csproj|c:\\visual studio\\projects\\serverapp\\server.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "AbsoluteMoniker": "D:0:0:{2E945596-87B9-421A-BD28-2BEBA77FED38}|ServerApp.csproj|c:\\visual studio\\projects\\clientserverproject\\serverapp\\server.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
       "RelativeMoniker": "D:0:0:{2E945596-87B9-421A-BD28-2BEBA77FED38}|ServerApp.csproj|solutionrelative:server.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     }
   ],
@@ -24,11 +24,11 @@
               "$type": "Document",
               "DocumentIndex": 0,
               "Title": "PacketIO.cs",
-              "DocumentMoniker": "C:\\Visual Studio\\Projects\\ServerApp\\PacketIO.cs",
+              "DocumentMoniker": "C:\\Visual Studio\\Projects\\ClientServerProject\\ServerApp\\PacketIO.cs",
               "RelativeDocumentMoniker": "PacketIO.cs",
-              "ToolTip": "C:\\Visual Studio\\Projects\\ServerApp\\PacketIO.cs",
+              "ToolTip": "C:\\Visual Studio\\Projects\\ClientServerProject\\ServerApp\\PacketIO.cs",
               "RelativeToolTip": "PacketIO.cs",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAABoAAAAfAAAAAAAAAA==",
+              "ViewState": "AgIAACAAAAAAAAAAAAA5wDMAAAA6AAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
               "WhenOpened": "2025-10-02T01:33:58.675Z",
               "EditorCaption": ""
@@ -37,11 +37,11 @@
               "$type": "Document",
               "DocumentIndex": 1,
               "Title": "Server.cs",
-              "DocumentMoniker": "C:\\Visual Studio\\Projects\\ServerApp\\Server.cs",
+              "DocumentMoniker": "C:\\Visual Studio\\Projects\\ClientServerProject\\ServerApp\\Server.cs",
               "RelativeDocumentMoniker": "Server.cs",
-              "ToolTip": "C:\\Visual Studio\\Projects\\ServerApp\\Server.cs",
+              "ToolTip": "C:\\Visual Studio\\Projects\\ClientServerProject\\ServerApp\\Server.cs",
               "RelativeToolTip": "Server.cs",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAABkAAAAnAAAAAAAAAA==",
+              "ViewState": "AgIAAF8AAAAAAAAAAAAmwHQAAAAuAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
               "WhenOpened": "2025-10-02T01:33:45.422Z",
               "EditorCaption": ""

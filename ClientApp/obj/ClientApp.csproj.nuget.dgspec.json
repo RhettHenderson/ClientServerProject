@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Visual Studio\\Projects\\ClientApp\\ClientApp.csproj": {}
+    "C:\\Visual Studio\\Projects\\ClientServerProject\\ClientApp\\ClientApp.csproj": {}
   },
   "projects": {
-    "C:\\Visual Studio\\Projects\\ClientApp\\ClientApp.csproj": {
+    "C:\\Visual Studio\\Projects\\ClientServerProject\\ClientApp\\ClientApp.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Visual Studio\\Projects\\ClientApp\\ClientApp.csproj",
+        "projectUniqueName": "C:\\Visual Studio\\Projects\\ClientServerProject\\ClientApp\\ClientApp.csproj",
         "projectName": "ClientApp",
-        "projectPath": "C:\\Visual Studio\\Projects\\ClientApp\\ClientApp.csproj",
+        "projectPath": "C:\\Visual Studio\\Projects\\ClientServerProject\\ClientApp\\ClientApp.csproj",
         "packagesPath": "C:\\Users\\rhett\\.nuget\\packages\\",
-        "outputPath": "C:\\Visual Studio\\Projects\\ClientApp\\obj\\",
+        "outputPath": "C:\\Visual Studio\\Projects\\ClientServerProject\\ClientApp\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
