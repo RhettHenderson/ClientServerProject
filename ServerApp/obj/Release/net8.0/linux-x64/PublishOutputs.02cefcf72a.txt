@@ -1,2 +1,0 @@
-C:\Visual Studio\Projects\ServerApp\publish-linux-x64\ServerApp.pdb
-C:\Visual Studio\Projects\ServerApp\publish-linux-x64\ServerApp
