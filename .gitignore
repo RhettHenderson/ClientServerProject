@@ -1,2 +1,3 @@
-**/bin/Debug
-**/bin/Release
+*/bin/Debug
+*/bin/Release
+*/.vs
