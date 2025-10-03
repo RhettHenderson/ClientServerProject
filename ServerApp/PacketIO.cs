@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace Client_Server;
 
@@ -45,6 +46,27 @@ public static class PacketIO
         }
     }
 
+    public static async Task SendPacketAsync(Socket socket, Packet packet)
+    {
+        byte[] body = Serialize(packet);
+        byte[] len = new byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
+
+        await SendAllAsync(socket, len);
+        await SendAllAsync(socket, body);
+    }
+
+    public static async Task SendAllAsync(Socket socket, ReadOnlyMemory<byte> data)
+    {
+        int sent = 0;
+        while (sent < data.Length)
+        {
+            int n = await socket.SendAsync(data.Slice(sent));
+            if (n == 0) throw new IOException("Socket closed");
+            sent += n;
+        }
+    }
+
     public static PacketStatus ReceivePacket(Socket socket, ref Packet packet)
     {
         Span<byte> lenBuf = stackalloc byte[4];
@@ -70,6 +92,31 @@ public static class PacketIO
 
     }
 
+    public static async Task<(PacketStatus Status, Packet Packet)> ReceivePacketAsync(Socket socket)
+    {
+        byte[] lenBuf = new byte[4];
+        int received = await ReceiveExactlyAsync(socket, lenBuf);
+        int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
+        if (received == 1)
+        {
+            return (PacketStatus.Disconnected, null);
+        }
+        else if (len < 0 || len > 16000000)
+        {
+            return (PacketStatus.Error, null);
+        }
+        //read body
+        byte[] body = new byte[len];
+        received = await ReceiveExactlyAsync(socket, body);
+        if (received == 1)
+        {
+            return (PacketStatus.Disconnected, null);
+        }
+        var packet = Deserialize(body);
+        return (PacketStatus.Ok, packet);
+    }
+
+    //Returns 1 for error
     static int ReceiveExactly(Socket socket, Span<byte> buffer)
     {
         int received = 0;
@@ -88,6 +135,36 @@ public static class PacketIO
             received += r;
         }
         return 0;
+    }
+    //Returns 1 for error
+    public static async Task<int> ReceiveExactlyAsync(Socket socket, Memory<byte> buffer)
+    {
+        int received = 0;
+        int r;
+        while (received < buffer.Length)
+        {
+            try
+            {
+                r = await socket.ReceiveAsync(buffer.Slice(received));
+            }
+            catch (SocketException)
+            {
+                return 1;
+            }
+            if (r == 0) return 1;
+            received += r;
+        }
+        return 0;
+    }
+
+    public static async Task<PacketStatus> ReceivePacketAsync_Compat(Socket socket, Action<Packet> setPacket)
+    {
+        var (status, pkt) = await ReceivePacketAsync(socket);
+        if (status == PacketStatus.Ok && pkt is not null)
+        {
+            setPacket(pkt);
+        }
+        return status;
     }
 }
 
