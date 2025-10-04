@@ -28,8 +28,8 @@ public static class PacketIO
         WriteIndented = false,
         TypeInfoResolver = null
     };
-    static byte[] Serialize(Packet packet) => JsonSerializer.SerializeToUtf8Bytes(packet, JsonOpts);
-    static Packet Deserialize(ReadOnlySpan<byte> data) => JsonSerializer.Deserialize<Packet>(data, JsonOpts)!;
+    public static byte[] Serialize(Packet packet) => JsonSerializer.SerializeToUtf8Bytes(packet, JsonOpts);
+    public static Packet Deserialize(ReadOnlySpan<byte> data) => JsonSerializer.Deserialize<Packet>(data, JsonOpts)!;
 
     public static void SendPacket(Socket socket, Packet packet)
     {
@@ -52,16 +52,17 @@ public static class PacketIO
         byte[] len = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
 
-        await SendAllAsync(socket, len);
-        await SendAllAsync(socket, body);
-    }
-
-    public static async Task SendAllAsync(Socket socket, ReadOnlyMemory<byte> data)
-    {
         int sent = 0;
-        while (sent < data.Length)
+        while (sent < len.Length)
         {
-            int n = await socket.SendAsync(data.Slice(sent));
+            int n = await socket.SendAsync(new ReadOnlyMemory<byte>(len));
+            if (n == 0) throw new IOException("Socket closed");
+            sent += n;
+        }
+        sent = 0;
+        while (sent < body.Length)
+        {
+            int n = await socket.SendAsync(new ReadOnlyMemory<byte>(body));
             if (n == 0) throw new IOException("Socket closed");
             sent += n;
         }
@@ -96,15 +97,16 @@ public static class PacketIO
     {
         byte[] lenBuf = new byte[4];
         int received = await ReceiveExactlyAsync(socket, lenBuf);
-        int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
         if (received == 1)
         {
             return (PacketStatus.Disconnected, null);
         }
-        else if (len < 0 || len > 16000000)
+        int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
+        if (len < 0 || len > 16000000)
         {
             return (PacketStatus.Error, null);
         }
+
         //read body
         byte[] body = new byte[len];
         received = await ReceiveExactlyAsync(socket, body);
@@ -157,15 +159,6 @@ public static class PacketIO
         return 0;
     }
 
-    public static async Task<PacketStatus> ReceivePacketAsync_Compat(Socket socket, Action<Packet> setPacket)
-    {
-        var (status, pkt) = await ReceivePacketAsync(socket);
-        if (status == PacketStatus.Ok && pkt is not null)
-        {
-            setPacket(pkt);
-        }
-        return status;
-    }
 }
 
 public enum PacketStatus
