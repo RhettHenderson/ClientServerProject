@@ -165,6 +165,7 @@ class Server
     }
 
     public static async Task ExecuteServerAsync(int port)
+
     {
         InitListener();
         _ = Task.Run(() =>
@@ -192,6 +193,16 @@ class Server
                 break; 
             }
 
+        }
+    }
+    
+    private static async Task HandleClientAsync(int id)
+    {
+        Console.WriteLine($"Client #{id} handler started.");
+        while (true)
+        {
+            bool keepAlive = await ProcessPacketAsync(id);
+            if (!keepAlive) break;
         }
     }
 
@@ -261,38 +272,7 @@ class Server
         return false;
     }
 
-    private static async Task HandleClientAsync(int id)
-    {
-        Console.WriteLine($"Client #{id} handler started.");
-        while (true)
-        {
-            bool keepAlive = await ProcessPacketAsync(id);
-            if (!keepAlive) break;
-        }
-    }
 
-
-    //public static async Task BroadcastAsync(Packet packet, int? excludeID = null)
-    //{
-    //    var dead = new List<int>();
-    //    foreach (var client in clients)
-    //    {
-    //        if (excludeID.HasValue && client.Key == excludeID.Value) continue;
-    //        try
-    //        {
-    //            await PacketIO.SendPacketAsync(client.Value, packet);
-    //        }
-    //        catch
-    //        {
-    //            dead.Add(client.Key);
-    //        }
-    //    }
-
-    //    foreach (var id in dead)
-    //    {
-    //        clients.TryRemove(id, out _);
-    //    }
-    //}
     public static async Task BroadcastAsync(Packet packet, int? excludeID = null)
     {
         var payload = PacketIO.Serialize(packet);
