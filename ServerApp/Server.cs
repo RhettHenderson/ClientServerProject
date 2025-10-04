@@ -7,6 +7,7 @@ using System.Threading;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 
 namespace Client_Server;
 class Server
@@ -197,14 +198,14 @@ class Server
     private static async Task<bool> ProcessPacketAsync(int id)
     {
         Socket client = clients[id];
-        Packet incoming = new Packet();
-        var status = await PacketIO.ReceivePacketAsync_Compat(client, p => incoming = p);
-
+        var (status, incoming) = await PacketIO.ReceivePacketAsync(client);
+        Console.WriteLine(status.ToString());
         if (status == PacketStatus.Disconnected)
         {
             Console.WriteLine($"Client {id} forcibly disconnected");
             client.Shutdown(SocketShutdown.Both);
             client.Close();
+            clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
             return false;
         }
         else if (status == PacketStatus.Error)
@@ -212,6 +213,7 @@ class Server
             Console.WriteLine("An error occured trying to receive the last packet. Closing connection.");
             client.Shutdown(SocketShutdown.Both);
             client.Close();
+            clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
             return false;
         }
         //if we reach here status is Ok
@@ -224,6 +226,7 @@ class Server
         {
             client.Shutdown(SocketShutdown.Both);
             client.Close();
+            clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
         }
         else if (commandStatus == 1)
         {
@@ -232,13 +235,22 @@ class Server
         else if (commandStatus == 0)
         {
             Console.WriteLine($"Received Message from {clientID}: {text}");
+            //Broadcasts the message to all other clients
+            //Commented out for now because it's causing issues
+            //BroadcastAsync(incoming, int.Parse(clientID));
             Packet reply = new Packet
             {
                 ClientID = "Server",
                 Headers = new Dictionary<string, string> { { "Type", "Ack" } },
                 Payload = Encoding.ASCII.GetBytes($"Ack: {text}")
             };
-            PacketIO.SendPacketAsync(client, reply);
+            foreach (var currClient in clients)
+            {
+                if (currClient.Key == id) continue; //Skip sending to the original sender
+                Console.WriteLine($"Sending reply to client {currClient.Key}.");
+                await PacketIO.SendPacketAsync(currClient.Value, reply);
+            }
+            //PacketIO.SendPacketAsync(client, reply);
             return true;
         }
         else
@@ -259,30 +271,48 @@ class Server
         }
     }
 
-    private static async Task SendPacketAsync(int id)
+
+    //public static async Task BroadcastAsync(Packet packet, int? excludeID = null)
+    //{
+    //    var dead = new List<int>();
+    //    foreach (var client in clients)
+    //    {
+    //        if (excludeID.HasValue && client.Key == excludeID.Value) continue;
+    //        try
+    //        {
+    //            await PacketIO.SendPacketAsync(client.Value, packet);
+    //        }
+    //        catch
+    //        {
+    //            dead.Add(client.Key);
+    //        }
+    //    }
+
+    //    foreach (var id in dead)
+    //    {
+    //        clients.TryRemove(id, out _);
+    //    }
+    //}
+    public static async Task BroadcastAsync(Packet packet, int? excludeID = null)
     {
-        Socket client = clients[id];
+        var payload = PacketIO.Serialize(packet);
+
+        var targets = clients
+            .Where(kv => !excludeID.HasValue || kv.Key != excludeID.Value)
+            .Select(kv => (id: kv.Key, state: kv.Value))
+            .ToArray();
+
+        var tasks = targets.Select(t => SafeSendAsync(t.id, payload, 3000));
+        await Task.WhenAll(tasks);
     }
 
-    public static async Task BroadcastAsync(byte[] data, int? excludeID = null)
+    static async Task SafeSendAsync(int id, byte[] payload, int timeoutMs)
     {
-        var dead = new List<int>();
-        foreach (var client in clients)
+        await PacketIO.SendPacketAsync(clients[id], new Packet
         {
-            if (excludeID.HasValue && client.Key == excludeID.Value) continue;
-            try
-            {
-                await client.Value.SendAsync(data, SocketFlags.None);
-            }
-            catch
-            {
-                dead.Add(client.Key);
-            }
-        }
-
-        foreach (var id in dead)
-        {
-            clients.TryRemove(id, out _);
-        }
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "Broadcast" } },
+            Payload = payload
+        });
     }
 }

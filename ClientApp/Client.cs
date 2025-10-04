@@ -10,9 +10,13 @@ using Client_Server;
 
 class Client
 {
-    static void Main(string[] args)
+    //static void Main(string[] args)
+    //{
+    //    ExecuteClient();
+    //}
+    public static async Task Main(string[] args)
     {
-        ExecuteClient();
+        await ExecuteClientAsync();
     }
 
     static void ExecuteClient()
@@ -55,7 +59,7 @@ class Client
                     string message = Console.ReadLine();
                     Packet pkt = new Packet
                     {
-                        ClientID = "Rhett's PC Client",
+                        ClientID = System.Environment.MachineName.ToString(),
                         Headers = new Dictionary<string, string>
                         {
                             { "Type", "Message" }
@@ -64,8 +68,9 @@ class Client
                     };
                     PacketIO.SendPacket(sender, pkt);
 
-                    var response = PacketIO.ReceivePacket(sender);
-                    var text = Encoding.UTF8.GetString(response.Payload);
+                    var incoming = new Packet();
+                    var status = PacketIO.ReceivePacket(sender, ref incoming);
+                    var text = Encoding.UTF8.GetString(incoming.Payload);
                     Console.WriteLine("Message from Server -> {0} < -", text);
                 }
                 Console.WriteLine("Closing connection");
@@ -91,6 +96,47 @@ class Client
         {
 
             Console.WriteLine(e.ToString());
+        }
+    }
+
+    private static async Task ExecuteClientAsync()
+    {
+        IPAddress ipAddr;
+        IPHostEntry ipHostEntry = Dns.GetHostEntry(Dns.GetHostName());
+        ipAddr = ipHostEntry.AddressList[0];
+        Socket sender = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        IPEndPoint localEndPoint = new IPEndPoint(ipAddr, 11111);
+
+        sender.Connect(localEndPoint);
+        Console.WriteLine("Socket connected to -> {0} < -", sender.RemoteEndPoint.ToString());
+        Console.WriteLine("Enter a message to send to the server, or enter \\q to quit:");
+        while (true)
+        {
+            string message = Console.ReadLine();
+            Packet pkt = new Packet
+            {
+                ClientID = System.Environment.MachineName.ToString(),
+                Headers = new Dictionary<string, string>
+                {
+                    { "Type", "Message" }
+                },
+                Payload = Encoding.UTF8.GetBytes(message)
+            };
+            PacketIO.SendPacketAsync(sender, pkt);
+            var (status, packet) = await PacketIO.ReceivePacketAsync(sender);
+            if (status == PacketStatus.Disconnected)
+            {
+                Console.WriteLine("Server disconnected");
+                continue;
+            }
+            if (status == PacketStatus.Error)
+            {
+                Console.WriteLine("Error receiving packet");
+                break;
+            }
+
+            var text = Encoding.UTF8.GetString(packet.Payload);
+            Console.WriteLine("Message from Server -> {0} < -", text);
         }
     }
 
