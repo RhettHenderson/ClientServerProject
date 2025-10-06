@@ -26,33 +26,6 @@ class Server
         await ExecuteServerAsync(11111);
     }
 
-    static void ExecuteServer()
-    {
-        Console.Title = "Server";
-        try
-        {
-            InitListener();
-            //StartConsoleListener();
-            Socket clientSocket = null;
-            bool connected = false;
-            while (true)
-            {
-                if (!connected)
-                {
-                    clientSocket = WaitForConnection();
-                    connected = true;
-                }
-
-                //Processes the packet and modifies the original values of clientSocket and connected
-                ProcessPacket(ref clientSocket, ref connected);
-            }
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine(e.ToString());
-        }
-    }
-
     static void InitListener()
     {
         Console.WriteLine("Initializing server...");
@@ -83,66 +56,16 @@ class Server
         listener.Listen(10);
     }
 
-    static Socket WaitForConnection()
+    static async Task<int> WaitForConnectionAsync()
     {
-        Console.WriteLine("Waiting for connection ... ");
-        Socket clientSocket = listener.Accept();
-        Console.WriteLine("Connection accepted from -> {0} < -", clientSocket.RemoteEndPoint.ToString());
-        return clientSocket;
-    }
-
-    static void ProcessPacket(ref Socket clientSocket, ref bool connected)
-    {
-        Packet incoming = new Packet();
-        var status = PacketIO.ReceivePacket(clientSocket, ref incoming);
-
-        if (status == PacketStatus.Disconnected)
-        {
-            Console.WriteLine("Client forcibly disconnected");
-            clientSocket.Shutdown(SocketShutdown.Both);
-            clientSocket.Close();
-            connected = false;
-            return;
-        }
-        else if (status == PacketStatus.Error)
-        {
-            Console.WriteLine("An error occured trying to receive the last packet. Closing connection.");
-            clientSocket.Shutdown(SocketShutdown.Both);
-            clientSocket.Close();
-            connected = false;
-            return;
-        }
-        //If we reach here, status is PacketStatus.Ok
-        var clientID = incoming.ClientID;
-        var headers = incoming.Headers;
-        var text = Encoding.UTF8.GetString(incoming.Payload);
-        int commandStatus = ReadCommand(text);
-        if (commandStatus == 2)
-        {
-            clientSocket.Shutdown(SocketShutdown.Both);
-            clientSocket.Close();
-            connected = false;
-        }
-        else if (commandStatus == 1)
-        {
-            return;
-        }
-        else if (commandStatus == 0)
-        {
-            Console.WriteLine($"Received Message from {clientID}: {text}");
-            Packet reply = new Packet
-            {
-                ClientID = "Server",
-                Headers = new Dictionary<string, string> { { "Type", "Ack" } },
-                Payload = Encoding.ASCII.GetBytes($"Ack: {text}")
-            };
-            PacketIO.SendPacket(clientSocket, reply);
-        }
-        else
-        {
-            Console.WriteLine($"Unexpected return value from ReadCommand: {commandStatus}");
-            return;
-        }
+        Console.WriteLine("Awaiting Connection...");
+        Socket client = await listener.AcceptAsync();
+        //Uses the Nagle algorithm (google for more info)
+        client.NoDelay = true;
+        int id = Interlocked.Increment(ref nextID);
+        clients[id] = client;
+        Console.WriteLine($"Client with ID {id} connected.");
+        return id;
     }
 
     //Returns 0 if no command, 1 if command exists and nothing needs to be done, 2 if command exists and connection should be closed
@@ -179,12 +102,7 @@ class Server
             Socket client = null;
             try
             {
-                Console.WriteLine("Awaiting connection...");
-                client = await listener.AcceptAsync();
-                client.NoDelay = true;
-                int id = Interlocked.Increment(ref nextID);
-                clients[id] = client;
-                Console.WriteLine($"Client with ID {id} connected using IP {client.RemoteEndPoint.ToString()}.");
+                int id = await WaitForConnectionAsync();
                 HandleClientAsync(id);
             }
             catch (OperationCanceledException e) 
