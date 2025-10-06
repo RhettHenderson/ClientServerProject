@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
+using Common;
 
 namespace Client_Server;
 class Server
@@ -65,6 +66,7 @@ class Server
         int id = Interlocked.Increment(ref nextID);
         clients[id] = client;
         Console.WriteLine($"Client with ID {id} connected.");
+        await SendInitialPacket(client, id);
         return id;
     }
 
@@ -105,18 +107,19 @@ class Server
                 int id = await WaitForConnectionAsync();
                 HandleClientAsync(id);
             }
-            catch (OperationCanceledException e) 
+            catch (OperationCanceledException e)
             {
                 Console.WriteLine(e.ToString());
-                break; 
+                break;
             }
 
         }
     }
-    
+
     private static async Task HandleClientAsync(int id)
     {
         Console.WriteLine($"Client #{id} handler started.");
+        //Sends the packet to tell the client what its id is
         while (true)
         {
             bool keepAlive = await ProcessPacketAsync(id);
@@ -151,6 +154,19 @@ class Server
         var text = Encoding.UTF8.GetString(incoming.Payload);
         int commandStatus = ReadCommand(text);
 
+        //Step 1: Read headers to determine packet type
+        var type = headers["Type"];
+        switch (type)
+        {
+            case ("Message"):
+                Console.WriteLine($"Client {id} with name {clientID} sent chat {text}");
+                await BroadcastAsync(incoming, id);
+                break;
+            default:
+                Console.WriteLine($"Invalid packet header: {type}.");
+                break;
+        }
+
         if (commandStatus == 2)
         {
             client.Shutdown(SocketShutdown.Both);
@@ -173,12 +189,7 @@ class Server
                 Headers = new Dictionary<string, string> { { "Type", "Ack" } },
                 Payload = Encoding.ASCII.GetBytes($"Ack: {text}")
             };
-            foreach (var currClient in clients)
-            {
-                if (currClient.Key == id) continue; //Skip sending to the original sender
-                Console.WriteLine($"Sending reply to client {currClient.Key}.");
-                await PacketIO.SendPacketAsync(currClient.Value, reply);
-            }
+
             //PacketIO.SendPacketAsync(client, reply);
             return true;
         }
@@ -193,24 +204,27 @@ class Server
 
     public static async Task BroadcastAsync(Packet packet, int? excludeID = null)
     {
-        var payload = PacketIO.Serialize(packet);
-
-        var targets = clients
-            .Where(kv => !excludeID.HasValue || kv.Key != excludeID.Value)
-            .Select(kv => (id: kv.Key, state: kv.Value))
-            .ToArray();
-
-        var tasks = targets.Select(t => SafeSendAsync(t.id, payload, 3000));
-        await Task.WhenAll(tasks);
+        foreach (var currClient in clients)
+        {
+            if (currClient.Key == excludeID) continue; //Skip sending to the original sender
+            Console.WriteLine($"Sending reply to client {currClient.Key}.");
+            await PacketIO.SendPacketAsync(currClient.Value, packet);
+        }
     }
 
-    static async Task SafeSendAsync(int id, byte[] payload, int timeoutMs)
+    public static async Task SendInitialPacket(Socket client, int id)
     {
-        await PacketIO.SendPacketAsync(clients[id], new Packet
+        Packet pkt = new Packet
         {
             ClientID = "Server",
-            Headers = new Dictionary<string, string> { { "Type", "Broadcast" } },
-            Payload = payload
-        });
+            Headers = new Dictionary<string, string>
+            {
+                { "Type", "Init" }
+            },
+            //Tells the client what its id is
+            Payload = Encoding.UTF8.GetBytes(id.ToString())
+        };
+        await PacketIO.SendPacketAsync(client, pkt);
+        Console.WriteLine($"Sent initial packet to client {id}");
     }
 }

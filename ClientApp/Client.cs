@@ -6,17 +6,20 @@ using System.IO;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Buffers.Binary;
-using Client_Server;
 using System.ComponentModel.Design;
+using System.Runtime.CompilerServices;
+using System.Numerics;
+using Common;
 
 class Client
 {
+    private static int id = -1;
     public static async Task Main(string[] args)
     {
-        await NewExecuteClientAsync("localhost", 11111);
+        await ExecuteClientAsync("localhost", 11111);
     }
 
-    static async Task NewExecuteClientAsync(string host, int port)
+    static async Task ExecuteClientAsync(string host, int port)
     {
         Console.Title = "Client";
         IPAddress ipAddr;
@@ -62,9 +65,24 @@ class Client
         while (true)
         {
             var (status, packet) = await PacketIO.ReceivePacketAsync(socket);
+            var headers = packet.Headers;
+            var text = Encoding.UTF8.GetString(packet.Payload);
             if (status == PacketStatus.Ok && packet != null)
             {
-                Console.WriteLine("$Message from server: {0}", Encoding.UTF8.GetString(packet.Payload));
+                var type = headers["Type"];
+                switch (type)
+                {
+                    case ("Message"):
+                        Console.WriteLine($"{packet.ClientID}: {text}");
+                        break;
+                    case ("Init"):
+                        id = int.Parse(text);
+                        Console.Title = $"Client {id}";
+                        break;
+                    default:
+                        Console.WriteLine("Invalid packet headers.");
+                        break;
+                }
             }
             else
             {
