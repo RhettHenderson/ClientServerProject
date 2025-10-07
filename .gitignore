@@ -1,7 +1,0 @@
-# Build outputs for any project
-**/bin/
-**/obj/
-
-# Visual Studio workspace
-.vs/
-**/.vs/
