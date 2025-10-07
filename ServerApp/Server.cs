@@ -21,6 +21,8 @@ class Server
     private static ConcurrentDictionary<int, Socket> clients = new();
     //This maps names to ID numbers
     private static ConcurrentDictionary<string, int> names = new();
+    //This maps ID to positions
+    private static ConcurrentDictionary<int, (float, float, float)> positions = new();
     private static int nextID = 0;
     private static string[] commands = { "help", "whisper", "w" };
     private static byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands);
@@ -221,6 +223,12 @@ class Server
                 Console.WriteLine($"Received ACK from client {id}.");
                 //Sets the client's name
                 names[clientID] = id;
+                return true;
+            case "Pos":
+                //Position update packet
+                positions[id] = PositionCodec.Decode(incoming.Payload);
+                //Just broadcast it to everyone else
+                await BroadcastAsync(incoming, id);
                 return true;
             default:
                 Console.WriteLine($"Invalid packet header: {type}.");

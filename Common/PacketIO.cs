@@ -21,6 +21,27 @@ public class Packet
     public byte[] Payload { get; set; } = Array.Empty<byte>();
 }
 
+public static class PositionCodec
+{
+    //Payload is 12 bytes: x, y, z
+    public static byte[] Encode(float x, float y, float z)
+    {
+        byte[] buf = new byte[12];
+        BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(0, 4), x);
+        BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(4, 4), y);
+        BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(8, 4), z);
+        return buf;
+    }
+
+    public static (float x, float y, float z) Decode(ReadOnlySpan<byte> buf)
+    {
+        float x = BinaryPrimitives.ReadSingleLittleEndian(buf.Slice(0, 4));
+        float y = BinaryPrimitives.ReadSingleLittleEndian(buf.Slice(4, 4));
+        float z = BinaryPrimitives.ReadSingleLittleEndian(buf.Slice(8, 4));
+        return (x, y, z);
+    }
+}
+
 public static class PacketIO
 {
     static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web)
