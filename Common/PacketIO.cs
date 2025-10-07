@@ -28,8 +28,13 @@ public static class PacketIO
         WriteIndented = false,
         TypeInfoResolver = null
     };
-    public static byte[] Serialize(Packet packet) => JsonSerializer.SerializeToUtf8Bytes(packet, JsonOpts);
-    public static Packet Deserialize(ReadOnlySpan<byte> data) => JsonSerializer.Deserialize<Packet>(data, JsonOpts)!;
+
+    private static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<Packet> PacketInfo = CommonJsonContext.Default.Packet;
+    private static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<Dictionary<string, string>> DictInfo = CommonJsonContext.Default.DictionaryStringString;
+    private static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<string[]> StringArrayInfo = CommonJsonContext.Default.StringArray;
+
+    public static byte[] Serialize(Packet packet) => JsonSerializer.SerializeToUtf8Bytes(packet, PacketInfo);
+    public static Packet Deserialize(ReadOnlySpan<byte> data) => JsonSerializer.Deserialize<Packet>(data, PacketInfo)!;
 
     public static void SendPacket(Socket socket, Packet packet)
     {

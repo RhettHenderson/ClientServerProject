@@ -143,7 +143,7 @@ class Client
 
                         else if (variable == "commands")
                         {
-                            commands = JsonSerializer.Deserialize<string[]>(packet.Payload) ?? Array.Empty<string>();
+                            commands = JsonSerializer.Deserialize(packet.Payload, Common.CommonJsonContext.Default.StringArray) ?? Array.Empty<string>();
                             Console.WriteLine("Received commands list from server.");
                         }
                         break;
