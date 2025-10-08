@@ -1,4 +1,5 @@
 ﻿using System;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -12,6 +13,7 @@ using Common;
 using System.Data;
 using System.Reflection.Metadata.Ecma335;
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 namespace Client_Server;
 class Server
@@ -23,18 +25,25 @@ class Server
     private static ConcurrentDictionary<string, int> names = new();
     //This maps ID to positions
     private static ConcurrentDictionary<int, (float, float, float)> positions = new();
+    //This maps username to password hashes
+    private static ConcurrentDictionary<string, string> passwords = new();
     private static int nextID = 0;
     private static string[] commands = { "help", "whisper", "w" };
     private static byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands);
+
+    private static int currentAuthCode = 111111;
+    private static string passwordsFile = "passwords.txt";
+
 
     public static async Task Main(string[] args)
     {
         await ExecuteServerAsync(11111);
     }
 
-    static void InitListener()
+    static async Task InitListener()
     {
         Console.WriteLine("Initializing server...");
+        await ReadPasswords(passwordsFile);
         Console.Write("Enter IP address to listen on or press Enter for localhost: ");
         string serverIP = Console.ReadLine();
         IPAddress ipAddr;
@@ -71,7 +80,6 @@ class Server
         int id = Interlocked.Increment(ref nextID);
         clients[id] = client;
         Console.WriteLine($"Client with ID {id} connected.");
-        await SendInitialPackets(client, id);
         return id;
     }
     
@@ -79,7 +87,7 @@ class Server
     public static async Task ExecuteServerAsync(int port)
     {
         Console.Title = "Server";
-        InitListener();
+        await InitListener();
         _ = Task.Run(() =>
         {
             Console.ReadLine();
@@ -143,8 +151,8 @@ class Server
         Packet reply = new Packet
         {
             ClientID = "Server",
-            Headers = new Dictionary<string, string> { { "Type", "Message" } },
-            Payload = Encoding.ASCII.GetBytes("")
+            Headers = new Dictionary<string, string> { { "Type", "Message"} },
+            Payload = Encoding.UTF8.GetBytes("")
         };
 
         //Step 1: Read headers to determine packet type
@@ -153,7 +161,7 @@ class Server
         switch (type)
         {
             case ("Message"):
-                Console.WriteLine($"Client {id} with name {clientID} sent chat {text}");
+                Console.WriteLine($"{clientID} sent chat {text}");
                 await BroadcastAsync(incoming, id);
                 return true;
             case ("Command"):
@@ -209,6 +217,8 @@ class Server
                         };
                         await PacketIO.SendPacketAsync(clients[targetID], whisper);
                         return true;
+                    case "create":
+                        return true;
                     default:
                         reply = new Packet
                         {
@@ -222,7 +232,7 @@ class Server
             case "Ack":
                 Console.WriteLine($"Received ACK from client {id}.");
                 //Sets the client's name
-                names[clientID] = id;
+                names[clientID] = id; 
                 return true;
             case "Pos":
                 //Position update packet
@@ -230,6 +240,77 @@ class Server
                 //Just broadcast it to everyone else
                 await BroadcastAsync(incoming, id);
                 return true;
+            case "Auth":
+                //Authentication packet containing the client's password
+                switch (await AuthenticateClient(clientID, text))
+                {
+                    case AuthenticationStatus.Success:
+                        Console.WriteLine($"Client {id} authenticated successfully as {clientID}.");
+                        await SendInitialPackets(client, id);
+                        return true;
+                    case AuthenticationStatus.WrongPassword:
+                        Console.WriteLine($"Client {id} used the wrong password. Closing connection.");
+                        reply.Headers["Type"] = "AuthFailure";
+                        await PacketIO.SendPacketAsync(client, reply);
+                        client.Shutdown(SocketShutdown.Both);
+                        client.Close();
+                        clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
+                        return false;
+                    case AuthenticationStatus.WrongUsername:
+                        Console.WriteLine($"Client {id} tried to login as non-existent user {clientID}. Closing connection.");
+                        reply.Headers["Type"] = "AuthFailure";
+                        await PacketIO.SendPacketAsync(client, reply);
+                        client.Shutdown(SocketShutdown.Both);
+                        client.Close();
+                        clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
+                        return false;
+                    default:
+                        break;
+                }
+                break;
+               
+            case "AuthCodeRequest":
+                //Passes a pointer so our global variable gets updated
+                GenerateAuthCode(ref currentAuthCode);
+                Console.WriteLine($"Authentication Code: {currentAuthCode}");
+                return true;
+            case "AuthCode":
+                int code = 0;
+                if (int.TryParse(text, out code))
+                {
+                    if (code == currentAuthCode)
+                    {
+                        Console.WriteLine($"Client {id} sent correct auth code {text}.");
+                        reply.Headers["Type"] = "AuthSuccess";
+                        await PacketIO.SendPacketAsync(client, reply);
+                        return true;
+                    }
+                    Console.WriteLine($"Client {id} sent incorrect auth code {text}.");
+                    reply.Headers["Type"] = "DC";
+                    await PacketIO.SendPacketAsync(client, reply);
+                    return false;
+                }
+                return true;
+            case "SetPassword":
+                if (!passwords.ContainsKey(clientID))
+                {
+                    File.AppendAllText(passwordsFile, $"\n{clientID}, {text}");
+                    Console.WriteLine($"Registered new user {clientID}.");
+
+                }
+                passwords[clientID] = text;
+                Console.WriteLine($"Password for {clientID} updated.");
+                return true;
+            case "CheckUserExists":
+                if (passwords.ContainsKey(clientID))
+                {
+                    reply.Headers["Type"] = "Data";
+                    reply.Headers["Var"] = "userExists";
+                    reply.Payload = Array.Empty<byte>();
+                    await PacketIO.SendPacketAsync(client, reply);
+                }
+                return true;
+                
             default:
                 Console.WriteLine($"Invalid packet header: {type}.");
                 break;
@@ -273,5 +354,52 @@ class Server
         pkt.Payload = cmdJson;
         await PacketIO.SendPacketAsync(client, pkt);
         Console.WriteLine($"Sent commands packet to client {id}");
+    }
+
+    static async Task<AuthenticationStatus> AuthenticateClient(string username, string passwordHash)
+    {
+        if (!passwords.ContainsKey(username))
+        {
+            return AuthenticationStatus.WrongUsername;
+        }
+        if (passwords[username] != passwordHash)
+        {
+            return AuthenticationStatus.WrongPassword;
+        }
+        return AuthenticationStatus.Success;
+    }
+
+    static async Task ReadPasswords(string filename)
+    {
+        using (var fileReader = File.ReadLines(filename).GetEnumerator())
+        {
+            while (fileReader.MoveNext())
+            {
+                var line = fileReader.Current;
+                var parts = line.Split(", ");
+                if (parts.Length != 2)
+                {
+                    Console.WriteLine($"Invalid line in password file: {line}");
+                    continue;
+                }
+                passwords[parts[0]] = parts[1];
+            }
+        }
+    }
+
+    static int GenerateAuthCode(ref int outCode)
+    {
+        Random rand = new Random();
+        //Creates a random 6 digit code
+        int code = rand.Next(111111, 1000000);
+        outCode = code;
+        return code;
+    }
+
+    private enum AuthenticationStatus
+    {
+        Success,
+        WrongPassword,
+        WrongUsername
     }
 }
