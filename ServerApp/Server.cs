@@ -281,12 +281,14 @@ class Server
                     if (code == currentAuthCode)
                     {
                         Console.WriteLine($"Client {id} sent correct auth code {text}.");
-                        reply.Headers["Type"] = "AuthSuccess";
+                        reply.Headers["Type"] = "AuthStatus";
+                        reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Success.ToString());
                         await PacketIO.SendPacketAsync(client, reply);
                         return true;
                     }
                     Console.WriteLine($"Client {id} sent incorrect auth code {text}.");
-                    reply.Headers["Type"] = "DC";
+                    reply.Headers["Type"] = "AuthStatus";
+                    reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.WrongCode.ToString());
                     await PacketIO.SendPacketAsync(client, reply);
                     return false;
                 }
@@ -301,14 +303,33 @@ class Server
                 passwords[clientID] = text;
                 Console.WriteLine($"Password for {clientID} updated.");
                 return true;
-            case "CheckUserExists":
+            case "CreateNewUser":
+                var name = headers["Name"];
+                reply.Headers["Type"] = "AuthStatus";
+                if (name != clientID)
+                {
+                    Console.WriteLine("Mismatched username and clientID. Closing connection.");
+                    reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Failed.ToString());
+                    await PacketIO.SendPacketAsync(client, reply);
+                    return false;
+                }
                 if (passwords.ContainsKey(clientID))
                 {
-                    reply.Headers["Type"] = "Data";
-                    reply.Headers["Var"] = "userExists";
-                    reply.Payload = Array.Empty<byte>();
+                    Console.WriteLine($"Client {id} tried to register using an existing username. Closing connection.");
+                    reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.UsernameTaken.ToString());
                     await PacketIO.SendPacketAsync(client, reply);
+                    return false;
                 }
+                //Otherwise we register the user
+                //Map their password hash to their name
+                passwords[name] = headers["PasswordHash"];
+                //Write new password and username to the file
+                File.AppendAllText(passwordsFile, $"\n{clientID}, {headers["PasswordHash"]}");
+                Console.WriteLine($"User {name} registered.");
+                reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Success.ToString());
+                await PacketIO.SendPacketAsync(client, reply);
+                await SendInitialPackets(client, id);
+
                 return true;
                 
             default:
@@ -399,7 +420,10 @@ class Server
     private enum AuthenticationStatus
     {
         Success,
+        Failed,
         WrongPassword,
-        WrongUsername
+        WrongUsername,
+        WrongCode,
+        UsernameTaken
     }
 }

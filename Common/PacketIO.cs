@@ -1,16 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
+﻿using System.Net.Sockets;
 using System.Text.Json;
-using System.Threading;
 using System.Buffers.Binary;
-using System.Diagnostics;
-using System.Runtime.CompilerServices;
 
 namespace Common;
 
@@ -93,6 +83,7 @@ public static class PacketIO
             sent += n;
         }
     }
+
 
     public static PacketStatus ReceivePacket(Socket socket, ref Packet packet)
     {

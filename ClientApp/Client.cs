@@ -11,14 +11,15 @@ using System.Runtime.CompilerServices;
 using System.Numerics;
 using System.Security.Cryptography;
 using Common;
+using System.Collections.Concurrent;
 
 class Client
 {
     private static int id = -1;
     private static string[] commands = Array.Empty<string>();
     private static string name;
-    private static bool authenticated = false;
     private static bool userExists = false;
+    private static ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
     public static async Task Main(string[] args)
     {
         await ExecuteClientAsync("localhost", 11111);
@@ -53,96 +54,60 @@ class Client
         name = Console.ReadLine() ?? "Client";
         if (name.Split(" ")[0] == "--create")
         {
-            CreateNewUser(name.Split(" ")[1], socket);
-            Thread.Sleep(200);
-            //Authenticated is updated when we receive the AuthSuccess packet
-            if (authenticated)
+            //Reassign name to just the name without the --create
+            name = name.Split(" ")[1];
+            if (await CreateNewUser(name, socket))
             {
-                Console.Write("Your account has been successfully registered. \nPlease enter a password, then you will be returned to login: ");
-                StringBuilder stringbuilder = new StringBuilder();
-                while (true)
-                {
-                    var key = Console.ReadKey(true);
-                    if (key.Key == ConsoleKey.Enter)
-                    {
-                        break;
-                    }
-                    else if (key.Key == ConsoleKey.Backspace)
-                    {
-                        if (stringbuilder.Length > 0)
-                        {
-                            stringbuilder.Remove(stringbuilder.Length - 1, 1);
-                            Console.Write("\b \b");
-                        }
-                    }
-                    else
-                    {
-                        stringbuilder.Append(key.KeyChar);
-                        Console.Write("*");
-                    }
-                }
-
-                Packet newPassword = new Packet
-                {
-                    ClientID = name.Split(" ")[1],
-                    Headers = new Dictionary<string, string> { { "Type", "SetPassword" } },
-                    Payload = Encoding.UTF8.GetBytes(SHA256Hash(stringbuilder.ToString()))
-                };
-                await PacketIO.SendPacketAsync(socket, newPassword);
-                Console.Write("\nEnter your username: ");
-                name = Console.ReadLine();
+                Console.WriteLine($"You are now logged in as {name}.");
             }
             else
             {
-                Console.WriteLine("Incorrect authentication code. Closing connection.");
                 socket.Shutdown(SocketShutdown.Both);
                 socket.Close();
-                return;
+                Environment.Exit(1);
             }
         }
-        Console.Write("Enter your password: ");
-        StringBuilder sb = new StringBuilder();
-        //Loop to read user input without showing it
-        while (true)
+        else
         {
-            var key = Console.ReadKey(true);
-            if (key.Key == ConsoleKey.Enter)
+            Console.Write("Enter your password: ");
+            StringBuilder sb = new StringBuilder();
+            //Loop to read user input without showing it
+            while (true)
             {
-                break;
-            }
-            else if (key.Key == ConsoleKey.Backspace)
-            {
-                if (sb.Length > 0)
+                var key = Console.ReadKey(true);
+                if (key.Key == ConsoleKey.Enter)
                 {
-                    sb.Remove(sb.Length - 1, 1);
-                    Console.Write("\b \b");
+                    break;
+                }
+                else if (key.Key == ConsoleKey.Backspace)
+                {
+                    if (sb.Length > 0)
+                    {
+                        sb.Remove(sb.Length - 1, 1);
+                        Console.Write("\b \b");
+                    }
+                }
+                else
+                {
+                    sb.Append(key.KeyChar);
+                    Console.Write("*");
                 }
             }
-            else
+            Console.Write("\n");
+            string passwordHash = SHA256Hash(sb.ToString());
+            var authPacket = new Packet
             {
-                sb.Append(key.KeyChar);
-                Console.Write("*");
-            }
+                ClientID = name,
+                Headers = new Dictionary<string, string>
+                {
+                    { "Type", "Auth" }
+                },
+                Payload = Encoding.UTF8.GetBytes(passwordHash)
+            };
+            await PacketIO.SendPacketAsync(socket, authPacket);
         }
-        Console.Write("\n");
-        string passwordHash = SHA256Hash(sb.ToString());
-        var authPacket = new Packet
-        {
-            ClientID = name,
-            Headers = new Dictionary<string, string>
-            {
-                { "Type", "Auth" }
-            },
-            Payload = Encoding.UTF8.GetBytes(passwordHash)
-        };
 
-        
-        await PacketIO.SendPacketAsync(socket, authPacket);
-
-        //Only write this if the server accepts our auth
-        Thread.Sleep(200);
         Console.WriteLine("Socket connected to -> {0} < -", ipAddr.MapToIPv4().ToString());
-
         Packet packet;
 
         while (true)
@@ -201,6 +166,13 @@ class Client
             if (status == PacketStatus.Ok && packet != null)
             {
                 var type = headers["Type"];
+
+                if (pendingResponses.TryRemove(type, out var tcs))
+                {
+                    tcs.TrySetResult(packet);
+                    continue;
+                }
+
                 switch (type)
                 {
                     case ("Message"):
@@ -245,22 +217,15 @@ class Client
                             Console.WriteLine("Received commands list from server.");
                             break;
                         }
-                        else if (variable == "userExists")
-                        {
-                            userExists = true;
-                        }
                         break;
 
-                    case ("AuthFailure"):
+                    case ("AuthStatus"):
                         Console.WriteLine("Authentication failed. Please try again.");
                         socket.Shutdown(SocketShutdown.Both);
                         socket.Close();
                         Environment.Exit(1);
                         break;
-                    case ("AuthSuccess"):
-                        Console.WriteLine("Authentication complete.");
-                        authenticated = true;
-                        break;
+    
                     default:
                         Console.WriteLine("Invalid packet headers.");
                         break;
@@ -286,41 +251,118 @@ class Client
         return sb.ToString();
     }
 
-    static async Task CreateNewUser(string username, Socket socket)
+    /*
+     *Better structure: CreateNewUser asks for a username and password. After it asks for password, it sends a CreateNewUser packet
+     * containing the username and password to the server. If success, it returns a Success packet. Otherwise, it indicates why
+     * 
+    */
+    static async Task<bool> CreateNewUser(string username, Socket socket)
     {
-        Packet checkUsernameTaken = new Packet
+        Console.Write("Create a password: ");
+        StringBuilder passwordSB = new StringBuilder();
+        StringBuilder passwordSB2 = new StringBuilder();
+        //Function for hidden typing
+        HiddenInput(ref passwordSB);
+        Console.Write("\nType your password again: ");
+        HiddenInput(ref passwordSB2);
+
+        if (passwordSB.ToString() != passwordSB2.ToString())
         {
-            ClientID = username,
-            Headers = new Dictionary<string, string> { { "Type", "CheckUserExists" } },
-            Payload = Array.Empty<byte>()
-        };
-        await PacketIO.SendPacketAsync(socket, checkUsernameTaken);
-        Thread.Sleep(200);
-        if (userExists)
-        {
-            Console.WriteLine($"{username} is already taken. Please try again.");
-            socket.Shutdown(SocketShutdown.Both);
-            socket.Close();
-            Environment.Exit(1);
+            Console.WriteLine("\nPasswords do not match. Try again.");
+            return false;
         }
 
-        Console.Write("Account creation is currently invite only. Please enter the authorization code generated by the server: ");
+        string passwordHash = SHA256Hash(passwordSB.ToString());
+
+        Console.Write("\nPlease enter the authorization code generated by the server: ");
         Packet authCodeRequest = new Packet
         {
-            ClientID = name,
+            ClientID = username,
             Headers = new Dictionary<string, string> { { "Type", "AuthCodeRequest" } },
-            Payload = Encoding.UTF8.GetBytes("")
+            Payload = Array.Empty<byte>()
         };
         await PacketIO.SendPacketAsync(socket, authCodeRequest);
         string userAuthCode = Console.ReadLine();
 
         Packet authCode = new Packet
         {
-            ClientID = name,
+            ClientID = username,
             Headers = new Dictionary<string, string> { { "Type", "AuthCode" } },
             Payload = Encoding.UTF8.GetBytes(userAuthCode)
         };
-        await PacketIO.SendPacketAsync(socket, authCode);
+
+        Packet response = await SendAndWaitAsync(socket, authCode, "AuthStatus");
+        var payload = Encoding.UTF8.GetString(response.Payload);
+        if (payload == "Success")
+        {
+            Packet makeNewUser = new Packet
+            {
+                ClientID = username,
+                Headers = new Dictionary<string, string> { { "Type", "CreateNewUser" }, { "Name", username }, { "PasswordHash", passwordHash } },
+                Payload = Array.Empty<byte>()
+            };
+            response = await SendAndWaitAsync(socket, makeNewUser, "AuthStatus");
+            payload = Encoding.UTF8.GetString(response.Payload);
+
+            switch (payload)
+            {
+                case "Success":
+                    Console.WriteLine("Account created.");
+                    return true;
+                case "UsernameTaken":
+                    Console.WriteLine("That username is already taken. Account creation failed.");
+                    return false;
+                case "Failed":
+                default:
+                    Console.WriteLine("Unknown response code from server. Account creation failed.");
+                    return false;
+            }
+
+        }
+        else
+        {
+            Console.WriteLine("Incorrect authentication code. Closing connection.");
+            return false;
+        }
+    }
+
+    public static async Task<Packet> SendAndWaitAsync(Socket socket, Packet packet, string expectedType)
+    {
+        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingResponses[expectedType] = tcs;
+
+        await PacketIO.SendPacketAsync(socket, packet);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using (cts.Token.Register(() => tcs.TrySetCanceled()))
+        {
+            return await tcs.Task;
+        }
+    }
+
+    private static void HiddenInput(ref StringBuilder sb, string shownChar = "*")
+    {
+        while (true)
+        {
+            var key = Console.ReadKey(true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                break;
+            }
+            else if (key.Key == ConsoleKey.Backspace)
+            {
+                if (sb.Length > 0)
+                {
+                    sb.Remove(sb.Length - 1, 1);
+                    Console.Write("\b \b");
+                }
+            }
+            else
+            {
+                sb.Append(key.KeyChar);
+                Console.Write(shownChar);
+            }
+        }
     }
 
 }
