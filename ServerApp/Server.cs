@@ -27,6 +27,12 @@ class Server
     private static ConcurrentDictionary<int, (float, float, float)> positions = new();
     //This maps username to password hashes
     private static ConcurrentDictionary<string, string> passwords = new();
+
+    private static ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
+
+    //File downloads in progress
+    private static ConcurrentDictionary<string, FileReceiveState> files = new();
+
     private static int nextID = 0;
     private static string[] commands = { "help", "whisper", "w" };
     private static byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands);
@@ -331,7 +337,18 @@ class Server
                 await SendInitialPackets(client, id);
 
                 return true;
-                
+            case "FileStart":
+                await HandleFileStartAsync(client, incoming);
+                Console.WriteLine("Received FileStart packet");
+                return true;
+            case "FileChunk":
+                await HandleFileChunkAsync(incoming);
+                Console.WriteLine("Received FileChunk packet");
+                return true;
+            case "FileEnd":
+                await HandleFileEndAsync(client, incoming);
+                Console.WriteLine("Received FileEnd packet");
+                return true;
             default:
                 Console.WriteLine($"Invalid packet header: {type}.");
                 break;
@@ -425,5 +442,136 @@ class Server
         WrongUsername,
         WrongCode,
         UsernameTaken
+    }
+
+    public class FileReceiveState
+    {
+        public string Name = "";
+        public long ExpectedLength;
+        public long Received;
+        public int ExpectedChunks;
+        public FileStream? Stream;
+    }
+
+    private static async Task HandleFileStartAsync(Socket client, Packet packet)
+    {
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var length = long.Parse(headers["Length"]);
+        var chunkSize = int.Parse(headers["ChunkSize"]);
+        string SaveDirectory = headers["SaveLocation"];
+
+        Directory.CreateDirectory(SaveDirectory);
+
+        var reply = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "FileStartAck" }, { "Status", "Ok" } },
+            Payload = Array.Empty<byte>()
+        };
+
+        //if (File.Exists(SaveDirectory) || files.ContainsKey(SaveDirectory))
+        //{
+        //    reply.Headers["Status"] = "Exists";
+        //    await PacketIO.SendPacketAsync(client, reply);
+        //    return;
+        //}
+        var state = new FileReceiveState
+        {
+            Name = name,
+            ExpectedLength = length,
+            ExpectedChunks = (int)((length + chunkSize - 1) / chunkSize),
+            Stream = new FileStream(SaveDirectory, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true),
+        };
+
+        files[name] = state;
+
+        state.Stream.Position = 0;
+        reply.Headers["Status"] = "OK";
+        await PacketIO.SendPacketAsync(client, reply);
+    }
+
+    private static async Task HandleFileChunkAsync(Packet packet)
+    {
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var index = int.Parse(headers["Index"]);
+        var payload = packet.Payload ?? Array.Empty<byte>();
+
+        //Ignore if name doesn't match the value we have in our dictionary
+        if (!files.TryGetValue(name, out var state) || state.Stream == null)
+        {
+            return;
+        }
+
+        //Append the payload
+        await state.Stream.WriteAsync(payload, 0, payload.Length);
+        state.Received += payload.Length;
+    }
+
+    private static async Task HandleFileEndAsync(Socket client, Packet packet)
+    {
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var totalChunks = int.Parse(headers["TotalChunks"]);
+        var reply = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "FileEndAck" } },
+            Payload = Array.Empty<byte>()
+        };
+
+        if (!files.TryGetValue(name, out var state) || state.Stream == null)
+        {
+            reply.Headers["Status"] = "Error";
+            await PacketIO.SendPacketAsync(client, reply);
+            return;
+        }
+        await PacketIO.SendPacketAsync(client, reply);
+        try
+        {
+            await state.Stream.FlushAsync();
+            state.Stream.Close();
+            state.Stream.Dispose();
+
+            
+            if (state.Received != state.ExpectedLength)
+            {
+                reply.Headers["Status"] = "LengthMismatch";
+            }
+            else if (totalChunks != state.ExpectedChunks)
+            {
+                reply.Headers["Status"] = "LengthMismatch";
+            }
+            else
+            {
+                reply.Headers["Status"] = "Success";
+            }
+        }
+        catch
+        {
+            reply.Headers["Status"] = "Error";
+        }
+        finally
+        {
+            files.TryRemove(name, out _);
+
+        }
+
+        await PacketIO.SendPacketAsync(client, reply);
+    }
+
+    public static async Task<Packet> SendAndWaitAsync(Socket socket, Packet packet, string expectedType)
+    {
+        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingResponses[expectedType] = tcs;
+
+        await PacketIO.SendPacketAsync(socket, packet);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using (cts.Token.Register(() => tcs.TrySetCanceled()))
+        {
+            return await tcs.Task;
+        }
     }
 }

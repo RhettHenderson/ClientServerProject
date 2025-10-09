@@ -119,8 +119,20 @@ class Client
             }
             else if (message.StartsWith("--"))
             {
-                var command = message[2..];
-                if (!commands.Contains(command.Split(" ")[0]))
+                var commands = message[2..].Split(" ");
+
+                //Local only command
+                if (commands[0] == "file")
+                {
+                    //Order of args is:
+                    /*Local path (with filename)
+                     * Name to save remote file as
+                     * Location to save remote file at (without filename)
+                     */
+                    await SendFileAsync(socket, commands[1], commands[2], commands[3]);
+                    continue;
+                }
+                if (!commands.Contains(commands[0]))
                 {
                     Console.WriteLine("Invalid command. Please try again");
                     continue;
@@ -132,7 +144,7 @@ class Client
                     {
                         { "Type", "Command" }
                     },
-                    Payload = Encoding.UTF8.GetBytes(command)
+                    Payload = Encoding.UTF8.GetBytes(commands[0])
                 };
             }
             else
@@ -200,9 +212,9 @@ class Client
                             {
                                 ClientID = name,
                                 Headers = new Dictionary<string, string>
-                                {
-                                    { "Type", "Ack" }
-                                },
+                            {
+                                { "Type", "Ack" }
+                            },
                                 Payload = Array.Empty<byte>()
                             };
                             //Send an ack back to confirm we received our ID and to set our name
@@ -225,7 +237,7 @@ class Client
                         socket.Close();
                         Environment.Exit(1);
                         break;
-    
+
                     default:
                         Console.WriteLine("Invalid packet headers.");
                         break;
@@ -238,7 +250,6 @@ class Client
             }
         }
     }
-
     public static string SHA256Hash(string input)
     {
         SHA256 hasher = SHA256.Create();
@@ -363,6 +374,110 @@ class Client
                 Console.Write(shownChar);
             }
         }
+    }
+
+    public static async Task<bool> SendFileAsync(Socket socket, string localPath, string? remoteFilename = null, string? saveLocation = "/", int chunkSize = 64 * 1024)
+    {
+        if (!File.Exists(localPath))
+        {
+            Console.WriteLine($"File not found: {localPath}");
+            return false;
+        }
+
+        remoteFilename ??= Path.GetFileName(localPath);
+
+        long length = new FileInfo(localPath).Length;
+
+        //Order of file transfer:
+        //File start packet
+        //File chunk packet (1 or more)
+        //File end packet
+
+        var start = new Packet
+        {
+            ClientID = name,
+            Headers = new Dictionary<string, string> {
+                    {"Type", "FileStart" },
+                    { "Name", remoteFilename },
+                    { "Length", length.ToString() },
+                    { "ChunkSize", chunkSize.ToString() },
+                    { "SaveLocation", saveLocation}
+                },
+            Payload = Array.Empty<byte>()
+        };
+
+        Console.WriteLine("Sending FileStart packet");
+        var startAck = await SendAndWaitAsync(socket, start, "FileStartAck");
+        if (startAck == null)
+        {
+            Console.WriteLine("FileStartAck never received");
+            return false;
+        }
+        if (startAck.Headers["Status"] == "Exists")
+        {
+            Console.WriteLine("File already exists in that location on the server. Overwrite denied.");
+            return false;
+        }
+
+        //Send file chunks
+        int index = 0;
+        int totalChunks = (int)(length + chunkSize - 1) / chunkSize;
+
+        await using (var fs = File.OpenRead(localPath))
+        {
+            byte[] buffer = new byte[chunkSize];
+            int read;
+            while ((read = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                var payload = (read == buffer.Length) ? buffer : buffer.AsSpan(0, read).ToArray();
+                var chunk = new Packet
+                {
+                    ClientID = name,
+                    Headers = new Dictionary<string, string>
+                    {
+                        { "Type", "FileChunk" },
+                        { "Name", remoteFilename },
+                        { "Index", index.ToString() }
+                    },
+                    Payload = payload
+                };
+
+                await PacketIO.SendPacketAsync(socket, chunk);
+                index++;
+            }
+        }
+
+        //Send file end
+        var end = new Packet
+        {
+            ClientID = name,
+            Headers = new Dictionary<string, string>
+            {
+                { "Type", "FileEnd" },
+                { "Name", remoteFilename },
+                { "TotalChunks", totalChunks.ToString() }
+            },
+            Payload = Array.Empty<byte>()
+        };
+        var endAck = await SendAndWaitAsync(socket, end, "FileEndAck");
+        
+        if (endAck != null)
+        {
+            if (endAck.Headers["Status"] == "Error")
+            {
+                Console.WriteLine("File send failed.");
+                return false;
+            }
+            Console.WriteLine($"File {remoteFilename} sent successfully.");
+            return true;
+        }
+        else
+        {
+            Console.WriteLine("File send failed.");
+            return false;
+        }
+
+
     }
 
 }
