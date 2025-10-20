@@ -397,7 +397,7 @@ class Client
         {
             ClientID = name,
             Headers = new Dictionary<string, string> {
-                    {"Type", "FileStart" },
+                    { "Type", "FileStart" },
                     { "Name", remoteFilename },
                     { "Length", length.ToString() },
                     { "ChunkSize", chunkSize.ToString() },

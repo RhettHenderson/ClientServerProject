@@ -455,39 +455,42 @@ class Server
 
     private static async Task HandleFileStartAsync(Socket client, Packet packet)
     {
+        Console.WriteLine("Beginning FileStart processing");
         var headers = packet.Headers;
         var name = headers["Name"];
         var length = long.Parse(headers["Length"]);
         var chunkSize = int.Parse(headers["ChunkSize"]);
-        string SaveDirectory = headers["SaveLocation"];
+        var saveLocation = headers["SaveLocation"];
 
-        Directory.CreateDirectory(SaveDirectory);
+        Directory.CreateDirectory(saveLocation);
+        var fullPath = Path.Combine(saveLocation, name);
 
         var reply = new Packet
         {
             ClientID = "Server",
-            Headers = new Dictionary<string, string> { { "Type", "FileStartAck" }, { "Status", "Ok" } },
+            Headers = new Dictionary<string, string> { { "Type", "FileStartAck" }, { "Status", "Ok" }, { "FileKey", fullPath } },
             Payload = Array.Empty<byte>()
         };
+        if (File.Exists(fullPath) || files.ContainsKey(fullPath))
+        {
+            reply.Headers["Status"] = "Exists";
+            await PacketIO.SendPacketAsync(client, reply);
+            return;
+        }
 
-        //if (File.Exists(SaveDirectory) || files.ContainsKey(SaveDirectory))
-        //{
-        //    reply.Headers["Status"] = "Exists";
-        //    await PacketIO.SendPacketAsync(client, reply);
-        //    return;
-        //}
         var state = new FileReceiveState
         {
-            Name = name,
+            Name = fullPath,
             ExpectedLength = length,
             ExpectedChunks = (int)((length + chunkSize - 1) / chunkSize),
-            Stream = new FileStream(SaveDirectory, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true),
+            Stream = new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true),
         };
 
-        files[name] = state;
+        files[fullPath] = state;
 
         state.Stream.Position = 0;
         reply.Headers["Status"] = "OK";
+        Console.WriteLine("Sending FileStartAck");
         await PacketIO.SendPacketAsync(client, reply);
     }
 
@@ -524,40 +527,39 @@ class Server
         if (!files.TryGetValue(name, out var state) || state.Stream == null)
         {
             reply.Headers["Status"] = "Error";
-            await PacketIO.SendPacketAsync(client, reply);
-            return;
         }
-        await PacketIO.SendPacketAsync(client, reply);
-        try
+        else
         {
-            await state.Stream.FlushAsync();
-            state.Stream.Close();
-            state.Stream.Dispose();
+            try
+            {
+                await state.Stream.FlushAsync();
+                state.Stream.Close();
+                state.Stream.Dispose();
 
-            
-            if (state.Received != state.ExpectedLength)
-            {
-                reply.Headers["Status"] = "LengthMismatch";
+
+                if (state.Received != state.ExpectedLength)
+                {
+                    reply.Headers["Status"] = "LengthMismatch";
+                }
+                else if (totalChunks != state.ExpectedChunks)
+                {
+                    reply.Headers["Status"] = "LengthMismatch";
+                }
+                else
+                {
+                    reply.Headers["Status"] = "Success";
+                }
             }
-            else if (totalChunks != state.ExpectedChunks)
+            catch
             {
-                reply.Headers["Status"] = "LengthMismatch";
+                reply.Headers["Status"] = "Error";
             }
-            else
+            finally
             {
-                reply.Headers["Status"] = "Success";
+                files.TryRemove(name, out _);
+
             }
         }
-        catch
-        {
-            reply.Headers["Status"] = "Error";
-        }
-        finally
-        {
-            files.TryRemove(name, out _);
-
-        }
-
         await PacketIO.SendPacketAsync(client, reply);
     }
 
