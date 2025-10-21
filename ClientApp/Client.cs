@@ -376,7 +376,7 @@ class Client
         }
     }
 
-    public static async Task<bool> SendFileAsync(Socket socket, string localPath, string? remoteFilename = null, string? saveLocation = "/", int chunkSize = 64 * 1024)
+    public static async Task<bool> SendFileAsync(Socket socket, string localPath, string? remoteFilename = null, string? saveLocation = "C:\\Users\rhett\\Documents\\uploads", int chunkSize = 64 * 1024)
     {
         if (!File.Exists(localPath))
         {
@@ -419,6 +419,8 @@ class Client
             return false;
         }
 
+        startAck.Headers.TryGetValue("FileKey", out var key);
+
         //Send file chunks
         int index = 0;
         int totalChunks = (int)(length + chunkSize - 1) / chunkSize;
@@ -437,7 +439,9 @@ class Client
                     {
                         { "Type", "FileChunk" },
                         { "Name", remoteFilename },
-                        { "Index", index.ToString() }
+                        { "Index", index.ToString() },
+                        { "SaveLocation", saveLocation },
+                        { "FileKey", key },
                     },
                     Payload = payload
                 };
@@ -455,7 +459,8 @@ class Client
             {
                 { "Type", "FileEnd" },
                 { "Name", remoteFilename },
-                { "TotalChunks", totalChunks.ToString() }
+                { "TotalChunks", totalChunks.ToString() },
+                { "FileKey", key }
             },
             Payload = Array.Empty<byte>()
         };

@@ -501,8 +501,15 @@ class Server
         var index = int.Parse(headers["Index"]);
         var payload = packet.Payload ?? Array.Empty<byte>();
 
+        headers.TryGetValue("FileKey", out var key);
+
+        if (string.IsNullOrEmpty(key))
+        {
+            return;
+        }
+
         //Ignore if name doesn't match the value we have in our dictionary
-        if (!files.TryGetValue(name, out var state) || state.Stream == null)
+        if (!files.TryGetValue(key, out var state) || state.Stream == null)
         {
             return;
         }
@@ -514,17 +521,27 @@ class Server
 
     private static async Task HandleFileEndAsync(Socket client, Packet packet)
     {
+        Console.WriteLine("Beginning file end processing.");
         var headers = packet.Headers;
         var name = headers["Name"];
         var totalChunks = int.Parse(headers["TotalChunks"]);
+
+        headers.TryGetValue("FileKey", out var key);
+        if (string.IsNullOrEmpty (key))
+        {
+            return;
+        }
+
         var reply = new Packet
+
+
         {
             ClientID = "Server",
             Headers = new Dictionary<string, string> { { "Type", "FileEndAck" } },
             Payload = Array.Empty<byte>()
         };
 
-        if (!files.TryGetValue(name, out var state) || state.Stream == null)
+        if (!files.TryGetValue(key, out var state) || state.Stream == null)
         {
             reply.Headers["Status"] = "Error";
         }
@@ -556,10 +573,11 @@ class Server
             }
             finally
             {
-                files.TryRemove(name, out _);
+                files.TryRemove(key, out _);
 
             }
         }
+        Console.WriteLine("Sending FileEndAck");
         await PacketIO.SendPacketAsync(client, reply);
     }
 
