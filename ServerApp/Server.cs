@@ -14,13 +14,27 @@ using System.Data;
 using System.Reflection.Metadata.Ecma335;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Authentication;
 
 namespace Client_Server;
 class Server
 {
     private static Socket listener;
+
+    private sealed class Conn 
+    {
+        public Socket socket;
+        public Stream io; 
+        public Conn(Socket s, Stream i) 
+        { 
+            socket = s; 
+            io = i; 
+        } 
+    }
     //This maps ID numbers to sockets
-    private static ConcurrentDictionary<int, Socket> clients = new();
+    private static ConcurrentDictionary<int, Conn> clients = new();
     //This maps names to ID numbers
     private static ConcurrentDictionary<string, int> names = new();
     //This maps ID to positions
@@ -83,8 +97,22 @@ class Server
         Socket client = await listener.AcceptAsync();
         //Uses the Nagle algorithm (google for more info)
         client.NoDelay = true;
+
+        var net = new NetworkStream(client, ownsSocket: true);
+        var ssl = new SslStream(net, leaveInnerStreamOpen: false);
+
+        //TODO: load certificate
+        X509Certificate2 cert = LoadServerCertificate();
+
+        await ssl.AuthenticateAsServerAsync(
+            serverCertificate: cert,
+            clientCertificateRequired: false,
+            enabledSslProtocols: SslProtocols.Tls12 | SslProtocols.Tls13,
+            checkCertificateRevocation: true
+        );
+
         int id = Interlocked.Increment(ref nextID);
-        clients[id] = client;
+        clients[id] = new Conn(client, ssl);
         Console.WriteLine($"Client with ID {id} connected.");
         return id;
     }
@@ -130,23 +158,29 @@ class Server
 
     private static async Task<bool> ProcessPacketAsync(int id)
     {
-        Socket client = clients[id];
-        var (status, incoming) = await PacketIO.ReceivePacketAsync(client);
+        var conn = clients[id];
+        var (status, incoming) = await PacketIO.ReceivePacketAsync(conn.io);
         Console.WriteLine(status.ToString());
         if (status == PacketStatus.Disconnected)
         {
             Console.WriteLine($"Client {id} forcibly disconnected");
-            client.Shutdown(SocketShutdown.Both);
-            client.Close();
-            clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
+            if (clients.TryRemove(id, out conn))
+            {
+                try { conn.io.Dispose(); } catch { }
+                try { conn.socket.Dispose(); } catch { }
+            }
+            clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
             return false;
         }
         else if (status == PacketStatus.Error)
         {
             Console.WriteLine("An error occured trying to receive the last packet. Closing connection.");
-            client.Shutdown(SocketShutdown.Both);
-            client.Close();
-            clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
+            if (clients.TryRemove(id, out conn))
+            {
+                try { conn.io.Dispose(); } catch { }
+                try { conn.socket.Dispose(); } catch { }
+            }
+            clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
             return false;
         }
         //if we reach here status is Ok
@@ -180,7 +214,7 @@ class Server
                             sb.Append($"--{cmd} ");
                         }
                         reply.Payload = Encoding.ASCII.GetBytes(sb.ToString());
-                        await PacketIO.SendPacketAsync(client, reply);
+                        await PacketIO.SendPacketAsync(conn.io, reply);
                         return true;
 
                     case "whisper":
@@ -189,7 +223,7 @@ class Server
                         if (args.Length < 3)
                         {
                             reply.Payload = Encoding.ASCII.GetBytes("Usage: --whisper <ID> <message>");
-                            await PacketIO.SendPacketAsync(client, reply);
+                            await PacketIO.SendPacketAsync(conn.io, reply);
                             return true;
                         }
                         //Step 1: Check if the user used ID or name
@@ -202,7 +236,7 @@ class Server
                             if (!names.ContainsKey(args[1]))
                             {
                                 reply.Payload = Encoding.ASCII.GetBytes($"User with name {args[1]} not found.");
-                                await PacketIO.SendPacketAsync(client, reply);
+                                await PacketIO.SendPacketAsync(conn.io, reply);
                                 return true;
                             }
                             //Name exists, get ID
@@ -211,7 +245,7 @@ class Server
                         if (!clients.ContainsKey(targetID))
                         {
                             reply.Payload = Encoding.ASCII.GetBytes($"User with ID {targetID} not found.");
-                            await PacketIO.SendPacketAsync(client, reply);
+                            await PacketIO.SendPacketAsync(conn.io, reply);
                             return true;
                         }
                         string msg = string.Join(" ", args, 2, args.Length - 2);
@@ -221,7 +255,7 @@ class Server
                             Headers = new Dictionary<string, string> { { "Type", "Whisper" } },
                             Payload = Encoding.ASCII.GetBytes($"{msg}")
                         };
-                        await PacketIO.SendPacketAsync(clients[targetID], whisper);
+                        await PacketIO.SendPacketAsync(clients[targetID].io, whisper);
                         return true;
                     case "create":
                         return true;
@@ -232,7 +266,7 @@ class Server
                             Headers = new Dictionary<string, string> { { "Type", "Message" } },
                             Payload = Encoding.ASCII.GetBytes($"Unknown command: {text}. Type --help for a list of commands.")
                         };
-                        await PacketIO.SendPacketAsync(client, reply);
+                        await PacketIO.SendPacketAsync(conn.io, reply);
                         return true;
                 }
             case "Ack":
@@ -252,23 +286,29 @@ class Server
                 {
                     case AuthenticationStatus.Success:
                         Console.WriteLine($"Client {id} authenticated successfully as {clientID}.");
-                        await SendInitialPackets(client, id);
+                        await SendInitialPackets(conn.io, id);
                         return true;
                     case AuthenticationStatus.WrongPassword:
                         Console.WriteLine($"Client {id} used the wrong password. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
-                        await PacketIO.SendPacketAsync(client, reply);
-                        client.Shutdown(SocketShutdown.Both);
-                        client.Close();
-                        clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
+                        await PacketIO.SendPacketAsync(conn.io, reply);
+                        if (clients.TryRemove(id, out conn))
+                        {
+                            try { conn.io.Dispose(); } catch { }
+                            try { conn.socket.Dispose(); } catch { }
+                        }
+                        clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
                         return false;
                     case AuthenticationStatus.WrongUsername:
                         Console.WriteLine($"Client {id} tried to login as non-existent user {clientID}. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
-                        await PacketIO.SendPacketAsync(client, reply);
-                        client.Shutdown(SocketShutdown.Both);
-                        client.Close();
-                        clients.TryRemove(new KeyValuePair<int, Socket>(id, clients[id]));
+                        await PacketIO.SendPacketAsync(conn.io, reply);
+                        if (clients.TryRemove(id, out conn))
+                        {
+                            try { conn.io.Dispose(); } catch { }
+                            try { conn.socket.Dispose(); } catch { }
+                        }
+                        clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
                         return false;
                     default:
                         break;
@@ -289,13 +329,13 @@ class Server
                         Console.WriteLine($"Client {id} sent correct auth code {text}.");
                         reply.Headers["Type"] = "AuthStatus";
                         reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Success.ToString());
-                        await PacketIO.SendPacketAsync(client, reply);
+                        await PacketIO.SendPacketAsync(conn.io, reply);
                         return true;
                     }
                     Console.WriteLine($"Client {id} sent incorrect auth code {text}.");
                     reply.Headers["Type"] = "AuthStatus";
                     reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.WrongCode.ToString());
-                    await PacketIO.SendPacketAsync(client, reply);
+                    await PacketIO.SendPacketAsync(conn.io, reply);
                     return false;
                 }
                 return true;
@@ -316,14 +356,14 @@ class Server
                 {
                     Console.WriteLine("Mismatched username and clientID. Closing connection.");
                     reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Failed.ToString());
-                    await PacketIO.SendPacketAsync(client, reply);
+                    await PacketIO.SendPacketAsync(conn.io, reply);
                     return false;
                 }
                 if (passwords.ContainsKey(clientID))
                 {
                     Console.WriteLine($"Client {id} tried to register using an existing username. Closing connection.");
                     reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.UsernameTaken.ToString());
-                    await PacketIO.SendPacketAsync(client, reply);
+                    await PacketIO.SendPacketAsync(conn.io, reply);
                     return false;
                 }
                 //Otherwise we register the user
@@ -333,12 +373,12 @@ class Server
                 File.AppendAllText(passwordsFile, $"\n{clientID}, {headers["PasswordHash"]}");
                 Console.WriteLine($"User {name} registered.");
                 reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Success.ToString());
-                await PacketIO.SendPacketAsync(client, reply);
-                await SendInitialPackets(client, id);
+                await PacketIO.SendPacketAsync(conn.io, reply);
+                await SendInitialPackets(conn.io, id);
 
                 return true;
             case "FileStart":
-                await HandleFileStartAsync(client, incoming);
+                await HandleFileStartAsync(conn.io, incoming);
                 Console.WriteLine("Received FileStart packet");
                 return true;
             case "FileChunk":
@@ -346,7 +386,7 @@ class Server
                 Console.WriteLine("Received FileChunk packet");
                 return true;
             case "FileEnd":
-                await HandleFileEndAsync(client, incoming);
+                await HandleFileEndAsync(conn.io, incoming);
                 Console.WriteLine("Received FileEnd packet");
                 return true;
             default:
@@ -364,7 +404,7 @@ class Server
         {
             if (currClient.Key == excludeID) continue; //Skip sending to the original sender
             Console.WriteLine($"Sending reply to client {currClient.Key}.");
-            await PacketIO.SendPacketAsync(currClient.Value, packet);
+            await PacketIO.SendPacketAsync(currClient.Value.io, packet);
         }
     }
 
@@ -391,6 +431,32 @@ class Server
         };
         pkt.Payload = cmdJson;
         await PacketIO.SendPacketAsync(client, pkt);
+        Console.WriteLine($"Sent commands packet to client {id}");
+    }
+
+    public static async Task SendInitialPackets(Stream stream, int id)
+    {
+        Packet pkt = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string>
+            {
+                { "Type", "Data" },
+                { "Var", "id" }
+            },
+            //Tells the client what its id is
+            Payload = Encoding.UTF8.GetBytes(id.ToString())
+        };
+        await PacketIO.SendPacketAsync(stream, pkt);
+        Console.WriteLine($"Sent ID packet to client {id}");
+
+        pkt.Headers = new Dictionary<string, string>
+        {
+            { "Type", "Data" },
+            { "Var", "commands" }
+        };
+        pkt.Payload = cmdJson;
+        await PacketIO.SendPacketAsync(stream, pkt);
         Console.WriteLine($"Sent commands packet to client {id}");
     }
 
@@ -494,6 +560,47 @@ class Server
         await PacketIO.SendPacketAsync(client, reply);
     }
 
+    private static async Task HandleFileStartAsync(Stream stream, Packet packet)
+    {
+        Console.WriteLine("Beginning FileStart processing");
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var length = long.Parse(headers["Length"]);
+        var chunkSize = int.Parse(headers["ChunkSize"]);
+        var saveLocation = headers["SaveLocation"];
+
+        Directory.CreateDirectory(saveLocation);
+        var fullPath = Path.Combine(saveLocation, name);
+
+        var reply = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "FileStartAck" }, { "Status", "Ok" }, { "FileKey", fullPath } },
+            Payload = Array.Empty<byte>()
+        };
+        if (File.Exists(fullPath) || files.ContainsKey(fullPath))
+        {
+            reply.Headers["Status"] = "Exists";
+            await PacketIO.SendPacketAsync(stream, reply);
+            return;
+        }
+
+        var state = new FileReceiveState
+        {
+            Name = fullPath,
+            ExpectedLength = length,
+            ExpectedChunks = (int)((length + chunkSize - 1) / chunkSize),
+            Stream = new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true),
+        };
+
+        files[fullPath] = state;
+
+        state.Stream.Position = 0;
+        reply.Headers["Status"] = "OK";
+        Console.WriteLine("Sending FileStartAck");
+        await PacketIO.SendPacketAsync(stream, reply);
+    }
+
     private static async Task HandleFileChunkAsync(Packet packet)
     {
         var headers = packet.Headers;
@@ -581,6 +688,68 @@ class Server
         await PacketIO.SendPacketAsync(client, reply);
     }
 
+    private static async Task HandleFileEndAsync(Stream stream, Packet packet)
+    {
+        Console.WriteLine("Beginning file end processing.");
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var totalChunks = int.Parse(headers["TotalChunks"]);
+
+        headers.TryGetValue("FileKey", out var key);
+        if (string.IsNullOrEmpty(key))
+        {
+            return;
+        }
+
+        var reply = new Packet
+
+
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "FileEndAck" } },
+            Payload = Array.Empty<byte>()
+        };
+
+        if (!files.TryGetValue(key, out var state) || state.Stream == null)
+        {
+            reply.Headers["Status"] = "Error";
+        }
+        else
+        {
+            try
+            {
+                await state.Stream.FlushAsync();
+                state.Stream.Close();
+                state.Stream.Dispose();
+
+
+                if (state.Received != state.ExpectedLength)
+                {
+                    reply.Headers["Status"] = "LengthMismatch";
+                }
+                else if (totalChunks != state.ExpectedChunks)
+                {
+                    reply.Headers["Status"] = "LengthMismatch";
+                }
+                else
+                {
+                    reply.Headers["Status"] = "Success";
+                }
+            }
+            catch
+            {
+                reply.Headers["Status"] = "Error";
+            }
+            finally
+            {
+                files.TryRemove(key, out _);
+
+            }
+        }
+        Console.WriteLine("Sending FileEndAck");
+        await PacketIO.SendPacketAsync(stream, reply);
+    }
+
     public static async Task<Packet> SendAndWaitAsync(Socket socket, Packet packet, string expectedType)
     {
         var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -593,5 +762,12 @@ class Server
         {
             return await tcs.Task;
         }
+    }
+
+    private static X509Certificate2 LoadServerCertificate()
+    {
+        var pfxPath = Environment.GetEnvironmentVariable("SERVER_PFX_PATH");
+        var pfxPwd = Environment.GetEnvironmentVariable("SERVER_PFX_PASSWORD");
+        return new X509Certificate2(pfxPath, pfxPwd, X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
     }
 }

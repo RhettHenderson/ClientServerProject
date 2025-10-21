@@ -84,6 +84,15 @@ public static class PacketIO
         }
     }
 
+    public static async Task SendPacketAsync(Stream stream, Packet packet)
+    {
+        byte[] body = Serialize(packet);
+        byte[] len = new byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
+
+        await stream.WriteAsync(len);
+        await stream.WriteAsync(body);
+    }
 
     public static PacketStatus ReceivePacket(Socket socket, ref Packet packet)
     {
@@ -135,6 +144,31 @@ public static class PacketIO
         return (PacketStatus.Ok, packet);
     }
 
+    public static async Task<(PacketStatus status, Packet packet)> ReceivePacketAsync(Stream stream)
+    {
+        byte[] lenBuf = new byte[4];
+        int received = await ReceiveExactlyAsync(stream, lenBuf);
+        if (received == 1)
+        {
+            return (PacketStatus.Disconnected, null);
+        }
+        int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
+        if (len < 0 || len > 16000000)
+        {
+            return (PacketStatus.Error, null);
+        }
+
+        //read body
+        byte[] body = new byte[len];
+        received = await ReceiveExactlyAsync(stream, body);
+        if (received == 1)
+        {
+            return (PacketStatus.Disconnected, null);
+        }
+        var packet = Deserialize(body);
+        return (PacketStatus.Ok, packet);
+    }
+
     //Returns 1 for error
     static int ReceiveExactly(Socket socket, Span<byte> buffer)
     {
@@ -165,6 +199,26 @@ public static class PacketIO
             try
             {
                 r = await socket.ReceiveAsync(buffer.Slice(received));
+            }
+            catch (SocketException)
+            {
+                return 1;
+            }
+            if (r == 0) return 1;
+            received += r;
+        }
+        return 0;
+    }
+
+    public static async Task<int> ReceiveExactlyAsync(Stream stream, Memory<byte> buffer)
+    {
+        int received = 0;
+        int r;
+        while (received < buffer.Length)
+        {
+            try
+            {
+                r = await stream.ReadAsync(buffer.Slice(received));
             }
             catch (SocketException)
             {

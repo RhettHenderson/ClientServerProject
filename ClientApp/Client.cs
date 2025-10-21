@@ -12,6 +12,9 @@ using System.Numerics;
 using System.Security.Cryptography;
 using Common;
 using System.Collections.Concurrent;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 
 class Client
 {
@@ -47,8 +50,22 @@ class Client
         Socket socket = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         IPEndPoint localEndPoint = new IPEndPoint(ipAddr, 11111);
         socket.Connect(localEndPoint);
+
+        //Wrapping the socket with SslStream
+        using var net = new NetworkStream(socket, ownsSocket: true);
+        var ssl = new SslStream(net, leaveInnerStreamOpen: false,
+            userCertificateValidationCallback: (sender, cert, chain, errors) =>
+                errors == SslPolicyErrors.None      // DEV ONLY; tighten in prod
+        );
+        await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",               // must match server cert
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            CertificateRevocationCheckMode = X509RevocationMode.Online
+        });
+
         //Start listening so we can receive the DC if it's sent
-        var recvTask = Task.Run(() => ReceiveLoopAsync(socket));
+        var recvTask = Task.Run(() => ReceiveLoopAsync(ssl));
 
         Console.Write("Enter your username or type --create <username> if you're a new user: ");
         name = Console.ReadLine() ?? "Client";
@@ -129,7 +146,7 @@ class Client
                      * Name to save remote file as
                      * Location to save remote file at (without filename)
                      */
-                    await SendFileAsync(socket, commands[1], commands[2], commands[3]);
+                    await SendFileAsync(ssl, commands[1], commands[2], commands[3]);
                     continue;
                 }
                 if (!commands.Contains(commands[0]))
@@ -168,11 +185,11 @@ class Client
         await recvTask;
     }
 
-    static async Task ReceiveLoopAsync(Socket socket)
+    static async Task ReceiveLoopAsync(Stream stream)
     {
         while (true)
         {
-            var (status, packet) = await PacketIO.ReceivePacketAsync(socket);
+            var (status, packet) = await PacketIO.ReceivePacketAsync(stream);
             var headers = packet.Headers;
             var text = Encoding.UTF8.GetString(packet.Payload);
             if (status == PacketStatus.Ok && packet != null)
@@ -218,7 +235,7 @@ class Client
                                 Payload = Array.Empty<byte>()
                             };
                             //Send an ack back to confirm we received our ID and to set our name
-                            await PacketIO.SendPacketAsync(socket, ack);
+                            await PacketIO.SendPacketAsync(stream, ack);
                             break;
                         }
 
@@ -233,8 +250,7 @@ class Client
 
                     case ("AuthStatus"):
                         Console.WriteLine("Authentication failed. Please try again.");
-                        socket.Shutdown(SocketShutdown.Both);
-                        socket.Close();
+                        stream.Dispose();
                         Environment.Exit(1);
                         break;
 
@@ -343,6 +359,20 @@ class Client
         pendingResponses[expectedType] = tcs;
 
         await PacketIO.SendPacketAsync(socket, packet);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using (cts.Token.Register(() => tcs.TrySetCanceled()))
+        {
+            return await tcs.Task;
+        }
+    }
+
+    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType)
+    {
+        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingResponses[expectedType] = tcs;
+
+        await PacketIO.SendPacketAsync(stream, packet);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         using (cts.Token.Register(() => tcs.TrySetCanceled()))
@@ -466,6 +496,115 @@ class Client
         };
         var endAck = await SendAndWaitAsync(socket, end, "FileEndAck");
         
+        if (endAck != null)
+        {
+            if (endAck.Headers["Status"] == "Error")
+            {
+                Console.WriteLine("File send failed.");
+                return false;
+            }
+            Console.WriteLine($"File {remoteFilename} sent successfully.");
+            return true;
+        }
+        else
+        {
+            Console.WriteLine("File send failed.");
+            return false;
+        }
+
+
+    }
+
+    public static async Task<bool> SendFileAsync(Stream stream, string localPath, string? remoteFilename = null, string? saveLocation = "C:\\Users\rhett\\Documents\\uploads", int chunkSize = 64 * 1024)
+    {
+        if (!File.Exists(localPath))
+        {
+            Console.WriteLine($"File not found: {localPath}");
+            return false;
+        }
+
+        remoteFilename ??= Path.GetFileName(localPath);
+
+        long length = new FileInfo(localPath).Length;
+
+        //Order of file transfer:
+        //File start packet
+        //File chunk packet (1 or more)
+        //File end packet
+
+        var start = new Packet
+        {
+            ClientID = name,
+            Headers = new Dictionary<string, string> {
+                    { "Type", "FileStart" },
+                    { "Name", remoteFilename },
+                    { "Length", length.ToString() },
+                    { "ChunkSize", chunkSize.ToString() },
+                    { "SaveLocation", saveLocation}
+                },
+            Payload = Array.Empty<byte>()
+        };
+
+        Console.WriteLine("Sending FileStart packet");
+        var startAck = await SendAndWaitAsync(stream, start, "FileStartAck");
+        if (startAck == null)
+        {
+            Console.WriteLine("FileStartAck never received");
+            return false;
+        }
+        if (startAck.Headers["Status"] == "Exists")
+        {
+            Console.WriteLine("File already exists in that location on the server. Overwrite denied.");
+            return false;
+        }
+
+        startAck.Headers.TryGetValue("FileKey", out var key);
+
+        //Send file chunks
+        int index = 0;
+        int totalChunks = (int)(length + chunkSize - 1) / chunkSize;
+
+        await using (var fs = File.OpenRead(localPath))
+        {
+            byte[] buffer = new byte[chunkSize];
+            int read;
+            while ((read = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                var payload = (read == buffer.Length) ? buffer : buffer.AsSpan(0, read).ToArray();
+                var chunk = new Packet
+                {
+                    ClientID = name,
+                    Headers = new Dictionary<string, string>
+                    {
+                        { "Type", "FileChunk" },
+                        { "Name", remoteFilename },
+                        { "Index", index.ToString() },
+                        { "SaveLocation", saveLocation },
+                        { "FileKey", key },
+                    },
+                    Payload = payload
+                };
+
+                await PacketIO.SendPacketAsync(stream, chunk);
+                index++;
+            }
+        }
+
+        //Send file end
+        var end = new Packet
+        {
+            ClientID = name,
+            Headers = new Dictionary<string, string>
+            {
+                { "Type", "FileEnd" },
+                { "Name", remoteFilename },
+                { "TotalChunks", totalChunks.ToString() },
+                { "FileKey", key }
+            },
+            Payload = Array.Empty<byte>()
+        };
+        var endAck = await SendAndWaitAsync(stream, end, "FileEndAck");
+
         if (endAck != null)
         {
             if (endAck.Headers["Status"] == "Error")
