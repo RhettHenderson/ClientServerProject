@@ -1,356 +1,207 @@
-﻿using System;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-using System.IO;
-using System.Collections.Generic;
-using System.Text.Json;
+﻿using Common;
+using System;
 using System.Buffers.Binary;
-using System.ComponentModel.Design;
-using System.Runtime.CompilerServices;
-using System.Numerics;
-using System.Security.Cryptography;
-using Common;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.ComponentModel.Design;
+using System.IO;
+using System.Net;
 using System.Net.Security;
+using System.Net.Sockets;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.Json;
+using static System.Net.Mime.MediaTypeNames;
 
-class Client
+public class Client : IAsyncDisposable
 {
-    private static int id = -1;
-    private static string[] commands = Array.Empty<string>();
-    private static string name;
-    private static bool userExists = false;
-    private static ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
-    public static async Task Main(string[] args)
+    private int id = -1;
+    public Stream? _stream = null;
+    private string[] commands = Array.Empty<string>();
+    public string Name { get; private set; }
+    private bool userExists = false;
+    private ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
+
+    //Events for the UI/CLI
+    public event Action<string, string>? MessageReceived;   // (from, text)
+    public event Action<string, string>? WhisperReceived;   // (from, text)
+    public event Action<string[]>? CommandsReceived;
+    public event Action<int>? IdAssigned;
+    public event Action? Disconnected;
+    public event Action<string>? Error;
+    public event Action<NotificationType, string>? Notification;
+    
+    public async Task ConnectAsync(string host, int port, string name, string? passwordHash, bool createUser = false, Func<Task<string?>>? requestAuthCode = null, string authCode = "")
     {
-        await ExecuteClientAsync("localhost", 11111);
-    }
+        var ip = IPAddress.TryParse(host, out var ipAddr) ? ipAddr : IPAddress.Loopback;
+        var socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        await socket.ConnectAsync(new IPEndPoint(ip, port));
 
-    static async Task ExecuteClientAsync(string host, int port)
-    {
-        Console.Title = "Client";
-        IPAddress ipAddr;
-        IPHostEntry ipHostEntry = Dns.GetHostEntry(Dns.GetHostName());
-        Console.Write("Enter server IP or press enter for localhost: ");
-        string input = Console.ReadLine();
-        if (input == "")
-        {
-            ipAddr = IPAddress.Loopback;
-        }
-        else
-        {
-            try
-            {
-                ipAddr = IPAddress.Parse(input);
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine("Invalid IP address format. Please enter a valid IP address.");
-                throw;
-            }
-
-        }
-        Socket socket = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-        IPEndPoint localEndPoint = new IPEndPoint(ipAddr, 11111);
-        socket.Connect(localEndPoint);
-
-        //Wrapping the socket with SslStream
-        using var net = new NetworkStream(socket, ownsSocket: true);
+        var net = new NetworkStream(socket, ownsSocket: true);
         var ssl = new SslStream(net, leaveInnerStreamOpen: false,
-            userCertificateValidationCallback: (sender, cert, chain, errors) => true //DEV ONLY, accept any cert
+            userCertificateValidationCallback: (_, __, ___, ____) => true // DEV ONLY
         );
         await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
         {
-            TargetHost = "localhost",               // must match server cert
+            TargetHost = "localhost",
             EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
             CertificateRevocationCheckMode = X509RevocationMode.NoCheck
         });
+        //Store it in a global so we can dispose it later
+        _stream = ssl;
+        Name = name;
 
-        //Start listening so we can receive the DC if it's sent
         var recvTask = Task.Run(() => ReceiveLoopAsync(ssl));
 
-        Console.Write("Enter your username or type --create <username> if you're a new user: ");
-        name = Console.ReadLine() ?? "Client";
-        if (name.Split(" ")[0] == "--create")
+        if (createUser)
         {
-            //Reassign name to just the name without the --create
-            name = name.Split(" ")[1];
-            if (await CreateNewUser(name, ssl))
+            Packet authCodeRequest = new Packet
             {
-                Console.WriteLine($"You are now logged in as {name}.");
-            }
-            else
-            {
-                socket.Shutdown(SocketShutdown.Both);
-                socket.Close();
-                Environment.Exit(1);
-            }
+                ClientID = name,
+                Headers = new Dictionary<string, string> { { "Type", "AuthCodeRequest" } },
+                Payload = Array.Empty<byte>()
+            };
+            await PacketIO.SendPacketAsync(ssl, authCodeRequest);
+
+            //Add an if statement here and a way to show an error in the UI later
+            await CreateNewUser(name, ssl, passwordHash, authCode);
         }
         else
         {
-            Console.Write("Enter your password: ");
-            StringBuilder sb = new StringBuilder();
-            //Loop to read user input without showing it
-            while (true)
-            {
-                var key = Console.ReadKey(true);
-                if (key.Key == ConsoleKey.Enter)
-                {
-                    break;
-                }
-                else if (key.Key == ConsoleKey.Backspace)
-                {
-                    if (sb.Length > 0)
-                    {
-                        sb.Remove(sb.Length - 1, 1);
-                        Console.Write("\b \b");
-                    }
-                }
-                else
-                {
-                    sb.Append(key.KeyChar);
-                    Console.Write("*");
-                }
-            }
-            Console.Write("\n");
-            string passwordHash = SHA256Hash(sb.ToString());
-            var authPacket = new Packet
+            Packet authPacket = new Packet
             {
                 ClientID = name,
                 Headers = new Dictionary<string, string>
                 {
                     { "Type", "Auth" }
                 },
-                Payload = Encoding.UTF8.GetBytes(passwordHash)
+                Payload = Encoding.UTF8.GetBytes(passwordHash ?? "")
             };
             await PacketIO.SendPacketAsync(ssl, authPacket);
         }
+    }
 
-        Console.WriteLine("Socket connected to -> {0} < -", ipAddr.MapToIPv4().ToString());
-        Packet packet;
+    public async Task SendMessageAsync(string text)
+    {
+        if (_stream is null) throw new InvalidOperationException("Not connected.");
 
-        while (true)
+        await PacketIO.SendPacketAsync(_stream, new Packet
         {
-            string? message = Console.ReadLine();
-            if (message == null || message == "\\q")
-            {
-                break;
-            }
-            else if (message.StartsWith("--"))
-            {
-                var commands = message[2..].Split(" ");
+            ClientID = Name,
+            Headers = new Dictionary<string, string> { { "Type", "Message" } },
+            Payload = Encoding.UTF8.GetBytes(text)
+        });
+    }
 
-                //Local only command
-                if (commands[0] == "file")
+    public async Task SendCommandAsync(string command)
+    {
+        if (_stream is null) throw new InvalidOperationException("Not connected.");
+        await PacketIO.SendPacketAsync(_stream, new Packet
+        {
+            ClientID = Name,
+            Headers = new Dictionary<string, string> { { "Type", "Command" } },
+            Payload = Encoding.UTF8.GetBytes(command)
+        });
+    }
+
+    public async Task ReceiveLoopAsync(Stream stream)
+    {
+        try
+        {
+            while (true)
+            {
+                var (status, packet) = await PacketIO.ReceivePacketAsync(stream);
+                var headers = packet.Headers;
+                var text = Encoding.UTF8.GetString(packet.Payload);
+                if (status == PacketStatus.Ok && packet != null)
                 {
-                    //Order of args is:
-                    /*Local path (with filename)
-                     * Name to save remote file as
-                     * Location to save remote file at (without filename)
-                     */
+                    var type = headers["Type"];
 
-                    string localPath = null;
-                    string remoteFilename = null; 
-                    string saveLocation = null;
-                    //Format verification
-                    if (commands.Length <= 1 || commands.Length > 6)
+                    if (pendingResponses.TryRemove(type, out var tcs))
                     {
-                        Console.WriteLine("Usage: --file <local path> [-r remote filename] [-s remote save location]");
+                        tcs.TrySetResult(packet);
                         continue;
                     }
-                    else
-                    {
-                        //--file <local path> -r <remote filename> -s <remote save location>
-                        //  0    1             2  3                 4 5
-                        for (int i = 1; i < commands.Length; i++)
-                        {
-                            if (i == 1)
-                            {
-                                localPath = commands[i];
-                                continue;
-                            }
-                            else if (commands[i] == "-r" && i + 1 < commands.Length)
-                            {
-                                remoteFilename = commands[i + 1];
-                                i++;
-                                continue;
-                            }
-                            else if (commands[i] == "-s" && i + 1 < commands.Length)
-                            {
-                                saveLocation = commands[i + 1];
-                                i++;
-                                continue;
 
+                    switch (type)
+                    {
+                        case ("Message"):
+                            if (text != "")
+                            {
+                                MessageReceived?.Invoke(packet.ClientID, text);
                             }
-                        }
+                            break;
+                        case ("Whisper"):
+                            WhisperReceived?.Invoke(packet.ClientID, text);
+                            break;
+                        //Data type tells the client to update some value
+                        case ("Data"):
+                            var variable = headers["Var"];
+                            if (variable == "id")
+                            {
+                                id = int.Parse(text);
+                                //Client is the default name if the user didn't input a name or there was an error
+                                if (Name == "Client")
+                                {
+                                    Name = $"Client {id}";
+                                    IdAssigned?.Invoke(id);
+                                }
+                                Packet ack = new Packet
+                                {
+                                    ClientID = Name,
+                                    Headers = new Dictionary<string, string>
+                                {
+                                    { "Type", "Ack" }
+                                },
+                                    Payload = Array.Empty<byte>()
+                                };
+                                //Send an ack back to confirm we received our ID and to set our name
+                                await PacketIO.SendPacketAsync(stream, ack);
+                                break;
+                            }
+
+
+                            else if (variable == "commands")
+                            {
+                                commands = JsonSerializer.Deserialize(packet.Payload, Common.CommonJsonContext.Default.StringArray) ?? Array.Empty<string>();
+                                CommandsReceived?.Invoke(commands);
+                                break;
+                            }
+                            break;
+
+                        case ("AuthFailure"):
+                            Error?.Invoke("Incorrect username or password. Connection closed.");
+                            Disconnected?.Invoke();
+                            stream.Dispose();
+                            return;
+
+                        default:
+                            Error?.Invoke($"Unknown packet type received: {type}");
+                            break;
                     }
-                    await SendFileAsync(ssl, localPath, remoteFilename, saveLocation);
-                    continue;
                 }
-                if (!commands.Contains(commands[0]))
+                else
                 {
-                    Console.WriteLine("Invalid command. Please try again");
-                    continue;
+                    break;
                 }
-                packet = new Packet
-                {
-                    ClientID = name,
-                    Headers = new Dictionary<string, string>
-                    {
-                        { "Type", "Command" }
-                    },
-                    Payload = Encoding.UTF8.GetBytes(commands[0])
-                };
             }
-            else
-            {
-                //The message we're sending to the server
-                packet = new Packet
-                {
-                    ClientID = name,
-                    Headers = new Dictionary<string, string>
-                {
-                    { "Type", "Message" }
-                },
-                    Payload = Encoding.UTF8.GetBytes(message)
-                };
-            }
-            await PacketIO.SendPacketAsync(ssl, packet);
         }
-        socket.Shutdown(SocketShutdown.Both);
-        socket.Close();
-
-        await recvTask;
-    }
-
-    static async Task ReceiveLoopAsync(Stream stream)
-    {
-        while (true)
+        catch (Exception ex)
         {
-            var (status, packet) = await PacketIO.ReceivePacketAsync(stream);
-            var headers = packet.Headers;
-            var text = Encoding.UTF8.GetString(packet.Payload);
-            if (status == PacketStatus.Ok && packet != null)
-            {
-                var type = headers["Type"];
-
-                if (pendingResponses.TryRemove(type, out var tcs))
-                {
-                    tcs.TrySetResult(packet);
-                    continue;
-                }
-
-                switch (type)
-                {
-                    case ("Message"):
-                        if (text != "")
-                        {
-                            Console.WriteLine($"{packet.ClientID}: {text}");
-                        }
-                        break;
-                    case ("Whisper"):
-                        Console.WriteLine($"(Whisper) {packet.ClientID}: {text}");
-                        break;
-                    //Data type tells the client to update some value
-                    case ("Data"):
-                        var variable = headers["Var"];
-                        if (variable == "id")
-                        {
-                            id = int.Parse(text);
-                            Console.Title = $"Client {id}";
-                            //Client is the default name if the user didn't input a name or there was an error
-                            if (name == "Client")
-                            {
-                                name = $"Client {id}";
-                            }
-                            Packet ack = new Packet
-                            {
-                                ClientID = name,
-                                Headers = new Dictionary<string, string>
-                            {
-                                { "Type", "Ack" }
-                            },
-                                Payload = Array.Empty<byte>()
-                            };
-                            //Send an ack back to confirm we received our ID and to set our name
-                            await PacketIO.SendPacketAsync(stream, ack);
-                            break;
-                        }
-
-
-                        else if (variable == "commands")
-                        {
-                            commands = JsonSerializer.Deserialize(packet.Payload, Common.CommonJsonContext.Default.StringArray) ?? Array.Empty<string>();
-                            Console.WriteLine("Received commands list from server.");
-                            break;
-                        }
-                        break;
-
-                    case ("AuthStatus"):
-                        Console.WriteLine("Authentication failed. Please try again.");
-                        stream.Dispose();
-                        Environment.Exit(1);
-                        break;
-
-                    case ("AuthFailure"):
-                        Console.WriteLine("Incorrect username or password. Connection closed.");
-                        stream.Dispose();
-                        return;
-
-                    default:
-                        Console.WriteLine("Invalid packet headers.");
-                        break;
-                }
-            }
-            else
-            {
-                Console.WriteLine("Server disconnected");
-                break;
-            }
+            Error?.Invoke($"Connection error: {ex.Message}");
+        }
+        finally
+        {
+            Disconnected?.Invoke();
+            try { stream.Dispose(); } catch { }
         }
     }
-    public static string SHA256Hash(string input)
-    {
-        SHA256 hasher = SHA256.Create();
-        byte[] hashValue = hasher.ComputeHash(Encoding.UTF8.GetBytes(input));
-        StringBuilder sb = new StringBuilder();
-        foreach (byte b in hashValue)
-        {
-            sb.Append(b.ToString("x2"));
-        }
-        return sb.ToString();
-    }
-
-    static async Task<bool> CreateNewUser(string username, Stream stream)
-    {
-        Console.Write("Create a password: ");
-        StringBuilder passwordSB = new StringBuilder();
-        StringBuilder passwordSB2 = new StringBuilder();
-        //Function for hidden typing
-        HiddenInput(ref passwordSB);
-        Console.Write("\nType your password again: ");
-        HiddenInput(ref passwordSB2);
-
-        if (passwordSB.ToString() != passwordSB2.ToString())
-        {
-            Console.WriteLine("\nPasswords do not match. Try again.");
-            return false;
-        }
-
-        string passwordHash = SHA256Hash(passwordSB.ToString());
-
-        Console.Write("\nPlease enter the authorization code generated by the server: ");
-        Packet authCodeRequest = new Packet
-        {
-            ClientID = username,
-            Headers = new Dictionary<string, string> { { "Type", "AuthCodeRequest" } },
-            Payload = Array.Empty<byte>()
-        };
-        await PacketIO.SendPacketAsync(stream, authCodeRequest);
-        string userAuthCode = Console.ReadLine();
-
+    async Task<bool> CreateNewUser(string username, Stream stream, string passwordHash, string userAuthCode)
+    { 
         Packet authCode = new Packet
         {
             ClientID = username,
@@ -374,26 +225,22 @@ class Client
             switch (payload)
             {
                 case "Success":
-                    Console.WriteLine("Account created.");
                     return true;
                 case "UsernameTaken":
-                    Console.WriteLine("That username is already taken. Account creation failed.");
                     return false;
                 case "Failed":
                 default:
-                    Console.WriteLine("Unknown response code from server. Account creation failed.");
                     return false;
             }
 
         }
         else
         {
-            Console.WriteLine("Incorrect authentication code. Closing connection.");
             return false;
         }
     }
 
-    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType)
+    public async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType)
     {
         var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
         pendingResponses[expectedType] = tcs;
@@ -407,36 +254,10 @@ class Client
         }
     }
 
-    private static void HiddenInput(ref StringBuilder sb, string shownChar = "*")
-    {
-        while (true)
-        {
-            var key = Console.ReadKey(true);
-            if (key.Key == ConsoleKey.Enter)
-            {
-                break;
-            }
-            else if (key.Key == ConsoleKey.Backspace)
-            {
-                if (sb.Length > 0)
-                {
-                    sb.Remove(sb.Length - 1, 1);
-                    Console.Write("\b \b");
-                }
-            }
-            else
-            {
-                sb.Append(key.KeyChar);
-                Console.Write(shownChar);
-            }
-        }
-    }
-
-    public static async Task<bool> SendFileAsync(Stream stream, string localPath, string? remoteFilename = null, string? saveLocation = null, int chunkSize = 64 * 1024)
+    public async Task<bool> SendFileAsync(string localPath, string? remoteFilename = null, string? saveLocation = null, int chunkSize = 64 * 1024)
     {
         if (!File.Exists(localPath))
         {
-            Console.WriteLine($"File not found: {localPath}");
             return false;
         }
 
@@ -459,7 +280,7 @@ class Client
 
         var start = new Packet
         {
-            ClientID = name,
+            ClientID = Name,
             Headers = new Dictionary<string, string> {
                     { "Type", "FileStart" },
                     { "Name", remoteFilename },
@@ -470,16 +291,14 @@ class Client
             Payload = Array.Empty<byte>()
         };
 
-        Console.WriteLine("Sending FileStart packet");
-        var startAck = await SendAndWaitAsync(stream, start, "FileStartAck");
+        Notification?.Invoke(NotificationType.Info, $"Starting file transfer: {remoteFilename} ({length} bytes)");
+        var startAck = await SendAndWaitAsync(_stream, start, "FileStartAck");
         if (startAck == null)
         {
-            Console.WriteLine("FileStartAck never received");
             return false;
         }
         if (startAck.Headers["Status"] == "Exists")
         {
-            Console.WriteLine("File already exists in that location on the server. Overwrite denied.");
             return false;
         }
 
@@ -493,12 +312,13 @@ class Client
         {
             byte[] buffer = new byte[chunkSize];
             int read;
+            Notification?.Invoke(NotificationType.Info, "Beginning file chunk transfers...");
             while ((read = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
             {
                 var payload = (read == buffer.Length) ? buffer : buffer.AsSpan(0, read).ToArray();
                 var chunk = new Packet
                 {
-                    ClientID = name,
+                    ClientID = Name,
                     Headers = new Dictionary<string, string>
                     {
                         { "Type", "FileChunk" },
@@ -510,7 +330,7 @@ class Client
                     Payload = payload
                 };
 
-                await PacketIO.SendPacketAsync(stream, chunk);
+                await PacketIO.SendPacketAsync(_stream, chunk);
                 index++;
             }
         }
@@ -518,7 +338,7 @@ class Client
         //Send file end
         var end = new Packet
         {
-            ClientID = name,
+            ClientID = Name,
             Headers = new Dictionary<string, string>
             {
                 { "Type", "FileEnd" },
@@ -528,25 +348,43 @@ class Client
             },
             Payload = Array.Empty<byte>()
         };
-        var endAck = await SendAndWaitAsync(stream, end, "FileEndAck");
+        Notification?.Invoke(NotificationType.Info, "Sending file end packet...");
+        var endAck = await SendAndWaitAsync(_stream, end, "FileEndAck");
 
         if (endAck != null)
         {
             if (endAck.Headers["Status"] == "Error")
             {
-                Console.WriteLine("File send failed.");
+                Error?.Invoke("File end ack error. File transfer failed.");
                 return false;
             }
-            Console.WriteLine($"File {remoteFilename} sent successfully.");
+            Notification?.Invoke(NotificationType.Info, "File transfer complete.");
             return true;
         }
         else
         {
-            Console.WriteLine("File send failed.");
+            Error?.Invoke("File end ack never received. File transfer failed.");
             return false;
         }
 
 
     }
 
+    public string SHA256Hash(string input)
+    {
+        SHA256 hasher = SHA256.Create();
+        byte[] hashValue = hasher.ComputeHash(Encoding.UTF8.GetBytes(input));
+        StringBuilder sb = new StringBuilder();
+        foreach (byte b in hashValue)
+        {
+            sb.Append(b.ToString("x2"));
+        }
+        return sb.ToString();
+    }
+    public async ValueTask DisposeAsync()
+    {
+        try { _stream?.Dispose(); } catch { }
+    }
+
+    public enum NotificationType { Info, Warning, Error }
 }
