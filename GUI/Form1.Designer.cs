@@ -61,6 +61,7 @@
             txtPassword.PasswordChar = '*';
             txtPassword.Size = new Size(793, 23);
             txtPassword.TabIndex = 2;
+            txtPassword.KeyDown += txtPassword_KeyDown;
             // 
             // IPAddressLabel
             // 

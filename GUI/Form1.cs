@@ -63,5 +63,13 @@ namespace GUI
             }
             return sb.ToString();
         }
+
+        private void txtPassword_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                loginButton_Click(sender, e);
+            }
+        }
     }
 }
