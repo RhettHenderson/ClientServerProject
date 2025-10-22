@@ -69,8 +69,7 @@ class Server
         IPAddress ipAddr;
         if (serverIP == "")
         {
-            IPHostEntry ipHost = Dns.GetHostEntry(Dns.GetHostName());
-            ipAddr = ipHost.AddressList[0];
+            ipAddr = IPAddress.Loopback; //127.0.0.1
         }
         else
         {
@@ -766,8 +765,22 @@ class Server
 
     private static X509Certificate2 LoadServerCertificate()
     {
-        var pfxPath = Environment.GetEnvironmentVariable("SERVER_PFX_PATH");
-        var pfxPwd = Environment.GetEnvironmentVariable("SERVER_PFX_PASSWORD");
-        return new X509Certificate2(pfxPath, pfxPwd, X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
+        //var pfxPath = Environment.GetEnvironmentVariable("SERVER_PFX_PATH");
+        //var pfxPwd = Environment.GetEnvironmentVariable("SERVER_PFX_PASSWORD");
+        //return new X509Certificate2(pfxPath, pfxPwd, X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
+        var thumb = (Environment.GetEnvironmentVariable("SERVER_CERT_THUMBPRINT") ?? "");
+        if (string.IsNullOrEmpty(thumb))
+        {
+            throw new InvalidOperationException("SERVER_CERT_THUMBPRINT environment variable not set.");
+        }
+
+        using var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+        store.Open(OpenFlags.ReadOnly);
+        var cert = store.Certificates
+            .Find(X509FindType.FindByThumbprint, thumb, validOnly: false)
+            .OfType<X509Certificate2>()
+            .FirstOrDefault(c => c.HasPrivateKey)
+        ?? throw new InvalidOperationException("Certificate with specified thumbprint not found.");
+        return cert;
     }
 }
