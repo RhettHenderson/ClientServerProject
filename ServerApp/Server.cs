@@ -158,7 +158,18 @@ class Server
     private static async Task<bool> ProcessPacketAsync(int id)
     {
         var conn = clients[id];
-        var (status, incoming) = await PacketIO.ReceivePacketAsync(conn.io);
+        PacketStatus status;
+        Packet incoming = null;
+        try
+        {
+            var (s, i) = await PacketIO.ReceivePacketAsync(conn.io);
+            status = s;
+            incoming = i;
+        }
+        catch
+        {
+            status = PacketStatus.Disconnected;
+        }
         Console.WriteLine(status.ToString());
         if (status == PacketStatus.Disconnected)
         {

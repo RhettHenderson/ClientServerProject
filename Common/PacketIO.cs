@@ -147,8 +147,8 @@ public static class PacketIO
     public static async Task<(PacketStatus status, Packet packet)> ReceivePacketAsync(Stream stream)
     {
         byte[] lenBuf = new byte[4];
-        int received = await ReceiveExactlyAsync(stream, lenBuf);
-        if (received == 1)
+        var received = await ReceiveExactlyAsync(stream, lenBuf);
+        if (received == PacketStatus.Disconnected)
         {
             return (PacketStatus.Disconnected, null);
         }
@@ -161,7 +161,7 @@ public static class PacketIO
         //read body
         byte[] body = new byte[len];
         received = await ReceiveExactlyAsync(stream, body);
-        if (received == 1)
+        if (received == PacketStatus.Disconnected)
         {
             return (PacketStatus.Disconnected, null);
         }
@@ -210,7 +210,7 @@ public static class PacketIO
         return 0;
     }
 
-    public static async Task<int> ReceiveExactlyAsync(Stream stream, Memory<byte> buffer)
+    public static async Task<PacketStatus> ReceiveExactlyAsync(Stream stream, Memory<byte> buffer)
     {
         int received = 0;
         int r;
@@ -220,11 +220,11 @@ public static class PacketIO
             {
                 r = await stream.ReadAsync(buffer.Slice(received));
             }
-            catch (SocketException)
+            catch
             {
-                return 1;
+                return PacketStatus.Disconnected;
             }
-            if (r == 0) return 1;
+            if (r == 0) return PacketStatus.Error;
             received += r;
         }
         return 0;
