@@ -150,7 +150,43 @@ class Client
                      * Name to save remote file as
                      * Location to save remote file at (without filename)
                      */
-                    await SendFileAsync(ssl, commands[1], commands[2], commands[3]);
+
+                    string localPath = null;
+                    string remoteFilename = null; 
+                    string saveLocation = null;
+                    //Format verification
+                    if (commands.Length <= 1 || commands.Length > 6)
+                    {
+                        Console.WriteLine("Usage: --file <local path> [-r remote filename] [-s remote save location]");
+                        continue;
+                    }
+                    else
+                    {
+                        //--file <local path> -r <remote filename> -s <remote save location>
+                        //  0    1             2  3                 4 5
+                        for (int i = 1; i < commands.Length; i++)
+                        {
+                            if (i == 1)
+                            {
+                                localPath = commands[i];
+                                continue;
+                            }
+                            else if (commands[i] == "-r" && i + 1 < commands.Length)
+                            {
+                                remoteFilename = commands[i + 1];
+                                i++;
+                                continue;
+                            }
+                            else if (commands[i] == "-s" && i + 1 < commands.Length)
+                            {
+                                saveLocation = commands[i + 1];
+                                i++;
+                                continue;
+
+                            }
+                        }
+                    }
+                    await SendFileAsync(ssl, localPath, remoteFilename, saveLocation);
                     continue;
                 }
                 if (!commands.Contains(commands[0]))
@@ -357,20 +393,6 @@ class Client
         }
     }
 
-    //public static async Task<Packet> SendAndWaitAsync(Socket socket, Packet packet, string expectedType)
-    //{
-    //    var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
-    //    pendingResponses[expectedType] = tcs;
-
-    //    await PacketIO.SendPacketAsync(socket, packet);
-
-    //    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-    //    using (cts.Token.Register(() => tcs.TrySetCanceled()))
-    //    {
-    //        return await tcs.Task;
-    //    }
-    //}
-
     public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType)
     {
         var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -410,7 +432,7 @@ class Client
         }
     }
 
-    public static async Task<bool> SendFileAsync(Stream stream, string localPath, string? remoteFilename = null, string? saveLocation = "C:\\Users\rhett\\Documents\\uploads", int chunkSize = 64 * 1024)
+    public static async Task<bool> SendFileAsync(Stream stream, string localPath, string? remoteFilename = null, string? saveLocation = null, int chunkSize = 64 * 1024)
     {
         if (!File.Exists(localPath))
         {
@@ -418,7 +440,15 @@ class Client
             return false;
         }
 
+
         remoteFilename ??= Path.GetFileName(localPath);
+        saveLocation ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads");
+
+        //If it doesn't start with any of these, assume it's a relative path and handle accordingly
+        if (saveLocation[0] != 'C' && saveLocation[0] != '/' && saveLocation[0] != '~')
+        {
+            saveLocation = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads", saveLocation);
+        }
 
         long length = new FileInfo(localPath).Length;
 
