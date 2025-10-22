@@ -5,3 +5,5 @@
 # Visual Studio workspace
 .vs/
 **/.vs/
+#Any certificates I accidentally include (ask me how I know to add this)
+*.pfx
