@@ -5,3 +5,10 @@
 # Visual Studio workspace
 .vs/
 **/.vs/
+
+#Any certificates I accidentally include (ask me how I know to add this)
+*.pfx
+
+#Any password and auth files should be kept local
+**/passwords.txt
+**/auth.txt

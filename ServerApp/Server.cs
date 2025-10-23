@@ -17,6 +17,7 @@ using System.Security.Cryptography;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Authentication;
+using System.Text.Json.Serialization;
 
 namespace Client_Server;
 class Server
@@ -48,11 +49,12 @@ class Server
     private static ConcurrentDictionary<string, FileReceiveState> files = new();
 
     private static int nextID = 0;
-    private static string[] commands = { "help", "whisper", "w" };
-    private static byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands);
-
+    private static readonly string[] commands = { "help", "whisper", "w" };
+    private static readonly byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands, CommonJsonContext.Default.StringArray);
+   
     private static int currentAuthCode = 111111;
     private static string passwordsFile = "passwords.txt";
+    private static string defaultSaveDir = @"C:\Users\rhett\Documents\uploads";
 
 
     public static async Task Main(string[] args)
@@ -116,32 +118,38 @@ class Server
         return id;
     }
     
+    private static async Task AcceptLoopAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                int id = await WaitForConnectionAsync();
+                _ = HandleClientAsync(id);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("Server shutting down...");
+        }
+        finally
+        {
+            try { listener.Close(); } catch { }
+        }
+    }
 
     public static async Task ExecuteServerAsync(int port)
     {
         Console.Title = "Server";
         await InitListener();
-        _ = Task.Run(() =>
-        {
-            Console.ReadLine();
-            try { listener.Close(); } catch { }
-        });
 
-        while (true)
-        {
-            Socket client = null;
-            try
-            {
-                int id = await WaitForConnectionAsync();
-                HandleClientAsync(id);
-            }
-            catch (OperationCanceledException e)
-            {
-                Console.WriteLine(e.ToString());
-                break;
-            }
+        //await AcceptLoopAsync();
+        var acceptTask = AcceptLoopAsync();
+        var consoleTask = Task.Run(() => RunServerConsoleAsync());
 
-        }
+        await Task.WhenAny(acceptTask, consoleTask);
+
+        try { await Task.WhenAll(acceptTask, consoleTask); } catch { }
     }
 
     private static async Task HandleClientAsync(int id)
@@ -538,6 +546,10 @@ class Server
         var chunkSize = int.Parse(headers["ChunkSize"]);
         var saveLocation = headers["SaveLocation"];
 
+        if (saveLocation == "=default")
+        {
+            saveLocation = defaultSaveDir;
+        }
         Directory.CreateDirectory(saveLocation);
         var fullPath = Path.Combine(saveLocation, name);
 
@@ -578,6 +590,15 @@ class Server
         var length = long.Parse(headers["Length"]);
         var chunkSize = int.Parse(headers["ChunkSize"]);
         var saveLocation = headers["SaveLocation"];
+
+        if (saveLocation.Contains("=default"))
+        {
+            saveLocation = defaultSaveDir;
+        }
+        else if (!saveLocation.StartsWith("C") && !saveLocation.StartsWith("/"))
+        {
+            saveLocation = Path.Combine(defaultSaveDir, saveLocation);
+        }
 
         Directory.CreateDirectory(saveLocation);
         var fullPath = Path.Combine(saveLocation, name);
@@ -776,22 +797,79 @@ class Server
 
     private static X509Certificate2 LoadServerCertificate()
     {
-        //var pfxPath = Environment.GetEnvironmentVariable("SERVER_PFX_PATH");
-        //var pfxPwd = Environment.GetEnvironmentVariable("SERVER_PFX_PASSWORD");
-        //return new X509Certificate2(pfxPath, pfxPwd, X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
         var thumb = (Environment.GetEnvironmentVariable("SERVER_CERT_THUMBPRINT") ?? "");
         if (string.IsNullOrEmpty(thumb))
         {
             throw new InvalidOperationException("SERVER_CERT_THUMBPRINT environment variable not set.");
         }
 
-        using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+        //First check local machine store
+        var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
         store.Open(OpenFlags.ReadOnly);
         var cert = store.Certificates
             .Find(X509FindType.FindByThumbprint, thumb, validOnly: false)
             .OfType<X509Certificate2>()
+            .FirstOrDefault(c => c.HasPrivateKey);
+
+        //If it's not in local machine, check current user store
+        if (cert == null)
+        {
+            store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+            store.Open(OpenFlags.ReadOnly);
+            cert = store.Certificates
+            .Find(X509FindType.FindByThumbprint, thumb, validOnly: false)
+            .OfType<X509Certificate2>()
             .FirstOrDefault(c => c.HasPrivateKey)
-        ?? throw new InvalidOperationException("Certificate with specified thumbprint not found.");
+            //if it's still null, it means it genuinely doesn't exist
+            ?? throw new InvalidOperationException("Certificate with specified thumbprint not found.");
+        }
         return cert;
+    }
+
+    private static async Task RunServerConsoleAsync()
+    {
+        while (true)
+        {
+            string? line = Console.ReadLine();
+            if (line is null) break;
+            if (string.IsNullOrEmpty(line)) continue;
+
+            try
+            {
+                await HandleServerCommandAsync(line.Trim());
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error processing command: {ex.Message}");
+            }
+        }
+    }
+
+    private static async Task HandleServerCommandAsync(string line)
+    {
+        if (line is null) return;
+
+        if (line.StartsWith("--"))
+        {
+           var parts = line[2..].Split(' ');
+           var cmd = parts[0];
+           var args = parts.Skip(1).ToArray();
+           switch (cmd)
+            {
+                case "setSaveDir":
+                    if (args.Length != 1)
+                    {
+                        Console.WriteLine("Usage: --setSaveDir <directory>");
+                        return;
+                    }
+                    var dir = args[0];
+                    defaultSaveDir = dir;
+                    Console.WriteLine($"Default save directory set to {defaultSaveDir}");
+                    return;
+                default:
+                    Console.WriteLine("Unknown command.");
+                    return;
+            }
+        }
     }
 }

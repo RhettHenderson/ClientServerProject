@@ -25,6 +25,7 @@ public class Client : IAsyncDisposable
     public string Name { get; private set; }
     private bool userExists = false;
     private ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
+    public string authFile { get; private set; }
 
     //Events for the UI/CLI
     public event Action<string, string>? MessageReceived;   // (from, text)
@@ -39,6 +40,7 @@ public class Client : IAsyncDisposable
     {
         var ip = IPAddress.TryParse(host, out var ipAddr) ? ipAddr : IPAddress.Loopback;
         var socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        authFile = "auth.txt";
         await socket.ConnectAsync(new IPEndPoint(ip, port));
 
         var net = new NetworkStream(socket, ownsSocket: true);
@@ -261,9 +263,10 @@ public class Client : IAsyncDisposable
             return false;
         }
 
-
+        //Instead of hardcoding the default location here, we let the serve choose it
+        //saveLocation ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads");
         remoteFilename ??= Path.GetFileName(localPath);
-        saveLocation ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads");
+        saveLocation ??= "=default";
 
         //If it doesn't start with any of these, assume it's a relative path and handle accordingly
         if (saveLocation[0] != 'C' && saveLocation[0] != '/' && saveLocation[0] != '~')
