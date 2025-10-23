@@ -232,6 +232,15 @@ public static class PacketIO
 
 }
 
+public class FileReceiveState
+{
+    public string Name = "";
+    public long ExpectedLength;
+    public long Received;
+    public int ExpectedChunks;
+    public FileStream? Stream;
+}
+
 public enum PacketStatus
 {
     Ok,

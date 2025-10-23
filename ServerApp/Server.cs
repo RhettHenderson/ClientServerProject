@@ -18,6 +18,8 @@ using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Authentication;
 using System.Text.Json.Serialization;
+using static System.Runtime.InteropServices.JavaScript.JSType;
+using System.Xml.Linq;
 
 namespace Client_Server;
 class Server
@@ -44,7 +46,9 @@ class Server
     private static ConcurrentDictionary<string, string> passwords = new();
 
     private static ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
-
+    private static Packet startAck;
+    private static Packet endAck;
+    private static Stream _stream = null;
     //File downloads in progress
     private static ConcurrentDictionary<string, FileReceiveState> files = new();
 
@@ -101,7 +105,6 @@ class Server
 
         var net = new NetworkStream(client, ownsSocket: true);
         var ssl = new SslStream(net, leaveInnerStreamOpen: false);
-
         //TODO: load certificate
         X509Certificate2 cert = LoadServerCertificate();
 
@@ -111,6 +114,7 @@ class Server
             enabledSslProtocols: SslProtocols.Tls12 | SslProtocols.Tls13,
             checkCertificateRevocation: true
         );
+        _stream = ssl;
 
         int id = Interlocked.Increment(ref nextID);
         clients[id] = new Conn(client, ssl);
@@ -407,6 +411,12 @@ class Server
                 await HandleFileEndAsync(conn.io, incoming);
                 Console.WriteLine("Received FileEnd packet");
                 return true;
+            case "FileStartAck":
+                startAck = incoming;
+                break;
+            case "FileEndAck":
+                endAck = incoming;
+                break;
             default:
                 Console.WriteLine($"Invalid packet header: {type}.");
                 break;
@@ -414,7 +424,6 @@ class Server
         
         return false;
     }
-
 
     public static async Task BroadcastAsync(Packet packet, int? excludeID = null)
     {
@@ -475,6 +484,7 @@ class Server
         };
         pkt.Payload = cmdJson;
         await PacketIO.SendPacketAsync(stream, pkt);
+        //Send a file upon connection (DEV PURPOSES)
         Console.WriteLine($"Sent commands packet to client {id}");
     }
 
@@ -528,14 +538,6 @@ class Server
         UsernameTaken
     }
 
-    public class FileReceiveState
-    {
-        public string Name = "";
-        public long ExpectedLength;
-        public long Received;
-        public int ExpectedChunks;
-        public FileStream? Stream;
-    }
 
     private static async Task HandleFileStartAsync(Socket client, Packet packet)
     {
@@ -595,7 +597,8 @@ class Server
         {
             saveLocation = defaultSaveDir;
         }
-        else if (!saveLocation.StartsWith("C") && !saveLocation.StartsWith("/"))
+        //If it doesn't start with C or / treat it like a local directory (flawed  but i'll fix later)
+        else if (!saveLocation.StartsWith("C") && !saveLocation.StartsWith("/") && !saveLocation.StartsWith("~"))
         {
             saveLocation = Path.Combine(defaultSaveDir, saveLocation);
         }
@@ -781,6 +784,133 @@ class Server
         await PacketIO.SendPacketAsync(stream, reply);
     }
 
+    public static async Task<bool> SendFileAsync(string localPath, string? remoteFilename = null, string? saveLocation = null, int chunkSize = 64 * 1024)
+    {
+        if (!System.IO.File.Exists(localPath))
+        {
+            return false;
+        }
+
+        //Instead of hardcoding the default location here, we let the serve choose it
+        //saveLocation ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads");
+        remoteFilename ??= Path.GetFileName(localPath);
+        saveLocation ??= "=default";
+
+        //If it doesn't start with any of these, assume it's a relative path and handle accordingly
+        if (saveLocation[0] != 'C' && saveLocation[0] != '/' && saveLocation[0] != '~')
+        {
+            saveLocation = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads", saveLocation);
+        }
+
+        long length = new FileInfo(localPath).Length;
+
+        //Order of file transfer:
+        //File start packet
+        //File chunk packet (1 or more)
+        //File end packet
+
+        var start = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> {
+                    { "Type", "FileStart" },
+                    { "Name", remoteFilename },
+                    { "Length", length.ToString() },
+                    { "ChunkSize", chunkSize.ToString() },
+                    { "SaveLocation", saveLocation}
+                },
+            Payload = Array.Empty<byte>()
+        };
+
+        //Notification?.Invoke(NotificationType.Info, $"Starting file transfer: {remoteFilename} ({length} bytes)");
+        Console.WriteLine("Starting file transfer");
+
+        //commented out because sendandwait isn't working properly
+
+        //var startAck = await SendAndWaitAsync(_stream, start, "FileStartAck");
+        await PacketIO.SendPacketAsync(_stream, start);
+        await Task.Delay(500);
+        if (startAck == null)
+        {
+            return false;
+        }
+        if (startAck.Headers["Status"] == "Exists")
+        {
+            return false;
+        }
+
+        startAck.Headers.TryGetValue("FileKey", out var key);
+
+        //Send file chunks
+        int index = 0;
+        int totalChunks = (int)(length + chunkSize - 1) / chunkSize;
+
+        await using (var fs = System.IO.File.OpenRead(localPath))
+        {
+            byte[] buffer = new byte[chunkSize];
+            int read;
+            //Notification?.Invoke(NotificationType.Info, "Beginning file chunk transfers...");
+            Console.WriteLine("Beginning file chunk transfers");
+            while ((read = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                var payload = (read == buffer.Length) ? buffer : buffer.AsSpan(0, read).ToArray();
+                var chunk = new Packet
+                {
+                    ClientID = "Server",
+                    Headers = new Dictionary<string, string>
+                    {
+                        { "Type", "FileChunk" },
+                        { "Name", remoteFilename },
+                        { "Index", index.ToString() },
+                        { "SaveLocation", saveLocation },
+                        { "FileKey", key },
+                    },
+                    Payload = payload
+                };
+
+                await PacketIO.SendPacketAsync(_stream, chunk);
+                index++;
+            }
+        }
+
+        //Send file end
+        var end = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string>
+            {
+                { "Type", "FileEnd" },
+                { "Name", remoteFilename },
+                { "TotalChunks", totalChunks.ToString() },
+                { "FileKey", key }
+            },
+            Payload = Array.Empty<byte>()
+        };
+        //Notification?.Invoke(NotificationType.Info, "Sending file end packet...");
+        Console.WriteLine("Sending file end packet");
+        //send and wait isn't working properly
+        //var endAck = await SendAndWaitAsync(_stream, end, "FileEndAck");
+        await PacketIO.SendPacketAsync(_stream, end);
+        await Task.Delay(500);
+        if (endAck != null)
+        {
+            if (endAck.Headers["Status"] == "Error")
+            {
+                //Error?.Invoke("File end ack error. File transfer failed.");
+                return false;
+            }
+            //Notification?.Invoke(NotificationType.Info, "File transfer complete.");
+            return true;
+        }
+        else
+        {
+            //Error?.Invoke("File end ack never received. File transfer failed.");
+            return false;
+        }
+
+
+    }
+
     public static async Task<Packet> SendAndWaitAsync(Socket socket, Packet packet, string expectedType)
     {
         var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -794,6 +924,22 @@ class Server
             return await tcs.Task;
         }
     }
+
+    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType)
+    {
+        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingResponses[expectedType] = tcs;
+
+        await PacketIO.SendPacketAsync(stream, packet);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using (cts.Token.Register(() => tcs.TrySetCanceled()))
+        {
+            return await tcs.Task;
+        }
+    }
+
+
 
     private static X509Certificate2 LoadServerCertificate()
     {
@@ -865,6 +1011,10 @@ class Server
                     var dir = args[0];
                     defaultSaveDir = dir;
                     Console.WriteLine($"Default save directory set to {defaultSaveDir}");
+                    return;
+                case "file":
+                    //skip verification for now
+                    await SendFileAsync(args[0]);
                     return;
                 default:
                     Console.WriteLine("Unknown command.");

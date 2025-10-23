@@ -16,6 +16,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using static System.Net.Mime.MediaTypeNames;
+using static System.Net.WebRequestMethods;
 
 public class Client : IAsyncDisposable
 {
@@ -26,6 +27,9 @@ public class Client : IAsyncDisposable
     private bool userExists = false;
     private ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
     public string authFile { get; private set; }
+    private static string defaultSaveDir = @"C:\Users\rhett\Documents\downloads";
+    //Current downloads in progress
+    private static ConcurrentDictionary<string, FileReceiveState> files = new();
 
     //Events for the UI/CLI
     public event Action<string, string>? MessageReceived;   // (from, text)
@@ -180,7 +184,18 @@ public class Client : IAsyncDisposable
                             Disconnected?.Invoke();
                             stream.Dispose();
                             return;
-
+                        case ("FileStart"):
+                            await HandleFileStartAsync(stream, packet);
+                            //Event for file received
+                            break;
+                        case ("FileChunk"):
+                            await HandleFileChunkAsync(packet);
+                            //Event for file chunk
+                            break;
+                        case ("FileEnd"):
+                            await HandleFileEndAsync(stream, packet);
+                            //Event for file end
+                            break;
                         default:
                             Error?.Invoke($"Unknown packet type received: {type}");
                             break;
@@ -258,7 +273,7 @@ public class Client : IAsyncDisposable
 
     public async Task<bool> SendFileAsync(string localPath, string? remoteFilename = null, string? saveLocation = null, int chunkSize = 64 * 1024)
     {
-        if (!File.Exists(localPath))
+        if (!System.IO.File.Exists(localPath))
         {
             return false;
         }
@@ -267,13 +282,6 @@ public class Client : IAsyncDisposable
         //saveLocation ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads");
         remoteFilename ??= Path.GetFileName(localPath);
         saveLocation ??= "=default";
-
-        //If it doesn't start with any of these, assume it's a relative path and handle accordingly
-        if (saveLocation[0] != 'C' && saveLocation[0] != '/' && saveLocation[0] != '~')
-        {
-            saveLocation = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "uploads", saveLocation);
-        }
-
         long length = new FileInfo(localPath).Length;
 
         //Order of file transfer:
@@ -311,7 +319,7 @@ public class Client : IAsyncDisposable
         int index = 0;
         int totalChunks = (int)(length + chunkSize - 1) / chunkSize;
 
-        await using (var fs = File.OpenRead(localPath))
+        await using (var fs = System.IO.File.OpenRead(localPath))
         {
             byte[] buffer = new byte[chunkSize];
             int read;
@@ -384,6 +392,142 @@ public class Client : IAsyncDisposable
         }
         return sb.ToString();
     }
+
+    private static async Task HandleFileStartAsync(Stream stream, Packet packet)
+    {
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var length = long.Parse(headers["Length"]);
+        var chunkSize = int.Parse(headers["ChunkSize"]);
+        var saveLocation = headers["SaveLocation"];
+
+        if (saveLocation.Contains("=default"))
+        {
+            saveLocation = defaultSaveDir;
+        }
+        //If it doesn't start with C or / treat it like a local directory (flawed  but i'll fix later)
+        else if (!saveLocation.StartsWith("C") && !saveLocation.StartsWith("/"))
+        {
+            saveLocation = Path.Combine(defaultSaveDir, saveLocation);
+        }
+
+        Directory.CreateDirectory(saveLocation);
+        var fullPath = Path.Combine(saveLocation, name);
+
+        var reply = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "FileStartAck" }, { "Status", "Ok" }, { "FileKey", fullPath } },
+            Payload = Array.Empty<byte>()
+        };
+        if (System.IO.File.Exists(fullPath) || files.ContainsKey(fullPath))
+        {
+            Console.WriteLine("File exists.");
+            reply.Headers["Status"] = "Exists";
+            await PacketIO.SendPacketAsync(stream, reply);
+            return;
+        }
+        var state = new FileReceiveState
+        {
+            Name = fullPath,
+            ExpectedLength = length,
+            ExpectedChunks = (int)((length + chunkSize - 1) / chunkSize),
+            Stream = new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true),
+        };
+        files[fullPath] = state;
+        state.Stream.Position = 0;
+        reply.Headers["Status"] = "OK";
+        Console.WriteLine("Sending FileStartAck");
+        await PacketIO.SendPacketAsync(stream, reply);
+    }
+
+    private static async Task HandleFileChunkAsync(Packet packet)
+    {
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var index = int.Parse(headers["Index"]);
+        var payload = packet.Payload ?? Array.Empty<byte>();
+
+        headers.TryGetValue("FileKey", out var key);
+
+        if (string.IsNullOrEmpty(key))
+        {
+            return;
+        }
+
+        //Ignore if name doesn't match the value we have in our dictionary
+        if (!files.TryGetValue(key, out var state) || state.Stream == null)
+        {
+            return;
+        }
+
+        //Append the payload
+        await state.Stream.WriteAsync(payload, 0, payload.Length);
+        state.Received += payload.Length;
+    }
+
+    private static async Task HandleFileEndAsync(Stream stream, Packet packet)
+    {
+        Console.WriteLine("Beginning file end processing.");
+        var headers = packet.Headers;
+        var name = headers["Name"];
+        var totalChunks = int.Parse(headers["TotalChunks"]);
+
+        headers.TryGetValue("FileKey", out var key);
+        if (string.IsNullOrEmpty(key))
+        {
+            return;
+        }
+
+        var reply = new Packet
+
+
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "FileEndAck" } },
+            Payload = Array.Empty<byte>()
+        };
+
+        if (!files.TryGetValue(key, out var state) || state.Stream == null)
+        {
+            reply.Headers["Status"] = "Error";
+        }
+        else
+        {
+            try
+            {
+                await state.Stream.FlushAsync();
+                state.Stream.Close();
+                state.Stream.Dispose();
+
+
+                if (state.Received != state.ExpectedLength)
+                {
+                    reply.Headers["Status"] = "LengthMismatch";
+                }
+                else if (totalChunks != state.ExpectedChunks)
+                {
+                    reply.Headers["Status"] = "LengthMismatch";
+                }
+                else
+                {
+                    reply.Headers["Status"] = "Success";
+                }
+            }
+            catch
+            {
+                reply.Headers["Status"] = "Error";
+            }
+            finally
+            {
+                files.TryRemove(key, out _);
+
+            }
+        }
+        Console.WriteLine("Sending FileEndAck");
+        await PacketIO.SendPacketAsync(stream, reply);
+    }
+
     public async ValueTask DisposeAsync()
     {
         try { _stream?.Dispose(); } catch { }
