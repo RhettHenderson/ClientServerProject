@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection.Metadata.Ecma335;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -41,10 +42,34 @@ class CLI
         {
             host = "localhost";
         }
-        Console.Write("Username: ");
-        string username = Console.ReadLine() ?? "Client";
-        Console.Write("Password: ");
-        string password = ReadPassword();
+        //Check for auth file to skip asking for username and password
+        string username = "";
+        string password = "";
+        if (File.Exists(client.authFile))
+        {
+            using (var fileReader = File.ReadLines(client.authFile).GetEnumerator())
+            {
+                while (fileReader.MoveNext())
+                {
+                    var line = fileReader.Current;
+                    var parts = line.Split(", ");
+                    if (parts.Length != 2)
+                    {
+                        Console.WriteLine($"Invalid line in auth file");
+                        continue;
+                    }
+                    username = parts[0];
+                    password = parts[1];
+                }
+            }
+        }
+        else
+        {
+            Console.Write("Username: ");
+            username = Console.ReadLine() ?? "Client";
+            Console.Write("Password: ");
+            password = ReadPassword();
+        }
         var hash = client.SHA256Hash(password);
 
         await client.ConnectAsync(host, 11111, username, hash);
