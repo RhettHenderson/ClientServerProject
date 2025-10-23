@@ -797,22 +797,32 @@ class Server
 
     private static X509Certificate2 LoadServerCertificate()
     {
-        //var pfxPath = Environment.GetEnvironmentVariable("SERVER_PFX_PATH");
-        //var pfxPwd = Environment.GetEnvironmentVariable("SERVER_PFX_PASSWORD");
-        //return new X509Certificate2(pfxPath, pfxPwd, X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
         var thumb = (Environment.GetEnvironmentVariable("SERVER_CERT_THUMBPRINT") ?? "");
         if (string.IsNullOrEmpty(thumb))
         {
             throw new InvalidOperationException("SERVER_CERT_THUMBPRINT environment variable not set.");
         }
 
-        using var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+        //First check local machine store
+        var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
         store.Open(OpenFlags.ReadOnly);
         var cert = store.Certificates
             .Find(X509FindType.FindByThumbprint, thumb, validOnly: false)
             .OfType<X509Certificate2>()
+            .FirstOrDefault(c => c.HasPrivateKey);
+
+        //If it's not in local machine, check current user store
+        if (cert == null)
+        {
+            store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+            store.Open(OpenFlags.ReadOnly);
+            cert = store.Certificates
+            .Find(X509FindType.FindByThumbprint, thumb, validOnly: false)
+            .OfType<X509Certificate2>()
             .FirstOrDefault(c => c.HasPrivateKey)
-        ?? throw new InvalidOperationException("Certificate with specified thumbprint not found.");
+            //if it's still null, it means it genuinely doesn't exist
+            ?? throw new InvalidOperationException("Certificate with specified thumbprint not found.");
+        }
         return cert;
     }
 
