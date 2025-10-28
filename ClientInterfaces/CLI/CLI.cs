@@ -28,9 +28,9 @@ class CLI
         {
             Console.ForegroundColor = type switch
             {
-                Client.NotificationType.Info => ConsoleColor.Green,
-                Client.NotificationType.Warning => ConsoleColor.Yellow,
-                Client.NotificationType.Error => ConsoleColor.Red,
+                NotificationType.Info => ConsoleColor.Green,
+                NotificationType.Warning => ConsoleColor.Yellow,
+                NotificationType.Error => ConsoleColor.Red,
                 _ => ConsoleColor.White,
             };
             Console.WriteLine($"{msg}");
@@ -115,7 +115,7 @@ class CLI
                         }
                     }
                 }
-                await client.SendFileAsync(localPath!, remoteFilename, saveLocation);
+                await PacketIO.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
             }
             else if (line.StartsWith("--"))
             {
