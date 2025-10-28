@@ -226,7 +226,7 @@ public class Client : IAsyncDisposable
             Payload = Encoding.UTF8.GetBytes(userAuthCode)
         };
 
-        Packet response = await SendAndWaitAsync(stream, authCode, "AuthStatus");
+        Packet response = await PacketIO.SendAndWaitAsync(stream, authCode, "AuthStatus", pendingResponses);
         var payload = Encoding.UTF8.GetString(response.Payload);
         if (payload == "Success")
         {
@@ -236,7 +236,7 @@ public class Client : IAsyncDisposable
                 Headers = new Dictionary<string, string> { { "Type", "CreateNewUser" }, { "Name", username }, { "PasswordHash", passwordHash } },
                 Payload = Array.Empty<byte>()
             };
-            response = await SendAndWaitAsync(stream, makeNewUser, "AuthStatus");
+            response = await PacketIO.SendAndWaitAsync(stream, makeNewUser, "AuthStatus", pendingResponses);
             payload = Encoding.UTF8.GetString(response.Payload);
 
             switch (payload)
@@ -254,20 +254,6 @@ public class Client : IAsyncDisposable
         else
         {
             return false;
-        }
-    }
-
-    public async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType)
-    {
-        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
-        pendingResponses[expectedType] = tcs;
-
-        await PacketIO.SendPacketAsync(stream, packet);
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        using (cts.Token.Register(() => tcs.TrySetCanceled()))
-        {
-            return await tcs.Task;
         }
     }
 
@@ -303,7 +289,7 @@ public class Client : IAsyncDisposable
         };
 
         Notification?.Invoke(NotificationType.Info, $"Starting file transfer: {remoteFilename} ({length} bytes)");
-        var startAck = await SendAndWaitAsync(_stream, start, "FileStartAck");
+        var startAck = await PacketIO.SendAndWaitAsync(_stream, start, "FileStartAck", pendingResponses);
         if (startAck == null)
         {
             return false;
@@ -360,7 +346,7 @@ public class Client : IAsyncDisposable
             Payload = Array.Empty<byte>()
         };
         Notification?.Invoke(NotificationType.Info, "Sending file end packet...");
-        var endAck = await SendAndWaitAsync(_stream, end, "FileEndAck");
+        var endAck = await PacketIO.SendAndWaitAsync(_stream, end, "FileEndAck", pendingResponses);
 
         if (endAck != null)
         {
@@ -379,18 +365,6 @@ public class Client : IAsyncDisposable
         }
 
 
-    }
-
-    public string SHA256Hash(string input)
-    {
-        SHA256 hasher = SHA256.Create();
-        byte[] hashValue = hasher.ComputeHash(Encoding.UTF8.GetBytes(input));
-        StringBuilder sb = new StringBuilder();
-        foreach (byte b in hashValue)
-        {
-            sb.Append(b.ToString("x2"));
-        }
-        return sb.ToString();
     }
 
     private static async Task HandleFileStartAsync(Stream stream, Packet packet)

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Reflection.Metadata.Ecma335;
 using System.Text;
 using System.Threading.Tasks;
+using Common;
 
 namespace ClientApp;
 
@@ -70,7 +71,7 @@ class CLI
             Console.Write("Password: ");
             password = ReadPassword();
         }
-        var hash = client.SHA256Hash(password);
+        var hash = Utility.SHA256Hash(password);
 
         await client.ConnectAsync(host, 11111, username, hash);
 

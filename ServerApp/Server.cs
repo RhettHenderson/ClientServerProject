@@ -24,40 +24,42 @@ using System.Xml.Linq;
 namespace Client_Server;
 class Server
 {
+    // === Networking ===
     private static Socket listener;
 
-    private sealed class Conn 
+    // === Connection Handling ===
+    private sealed class Conn
     {
-        public Socket socket;
-        public Stream io; 
-        public Conn(Socket s, Stream i) 
-        { 
-            socket = s; 
-            io = i; 
-        } 
+        public Socket Socket { get; }
+        public Stream IO { get; }
+
+        public Conn(Socket socket, Stream io)
+        {
+            Socket = socket;
+            IO = io;
+        }
     }
-    //This maps ID numbers to sockets
-    private static ConcurrentDictionary<int, Conn> clients = new();
-    //This maps names to ID numbers
-    private static ConcurrentDictionary<string, int> names = new();
-    //This maps ID to positions
-    private static ConcurrentDictionary<int, (float, float, float)> positions = new();
-    //This maps username to password hashes
-    private static ConcurrentDictionary<string, string> passwords = new();
 
-    private static ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
+    // === Active Clients & State ===
+    private static readonly ConcurrentDictionary<int, Conn> clients = new();               // ID -> connection
+    private static readonly ConcurrentDictionary<string, int> names = new();               // username -> ID
+    private static readonly ConcurrentDictionary<int, (float, float, float)> positions = new(); // ID -> position
+    private static readonly ConcurrentDictionary<string, FileReceiveState> files = new();  // fileKey -> state
+    private static readonly ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new(); // expectedType -> TaskCompletionSource
+
+    // === Authentication ===
+    private static readonly ConcurrentDictionary<string, string> passwords = new();        // username -> password hash
+    private static int currentAuthCode = 111111;
+    private static string passwordsFile = "passwords.txt";
+
+    // === File I/O ===
     private static Stream _stream = null;
-    //File downloads in progress
-    private static ConcurrentDictionary<string, FileReceiveState> files = new();
+    private static string defaultSaveDir = @"C:\Users\rhett\Documents\uploads";
 
+    // === Commands & Misc ===
     private static int nextID = 0;
     private static readonly string[] commands = { "help", "whisper", "w" };
     private static readonly byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands, CommonJsonContext.Default.StringArray);
-   
-    private static int currentAuthCode = 111111;
-    private static string passwordsFile = "passwords.txt";
-    private static string defaultSaveDir = @"C:\Users\rhett\Documents\uploads";
-
 
     public static async Task Main(string[] args)
     {
@@ -435,7 +437,7 @@ class Server
         }
     }
 
-    public static async Task SendInitialPackets(Socket client, int id)
+    private static async Task SendInitialPackets(Socket client, int id)
     {
         Packet pkt = new Packet
         {
@@ -461,7 +463,7 @@ class Server
         Console.WriteLine($"Sent commands packet to client {id}");
     }
 
-    public static async Task SendInitialPackets(Stream stream, int id)
+    private static async Task SendInitialPackets(Stream stream, int id)
     {
         Packet pkt = new Packet
         {
@@ -828,7 +830,7 @@ class Server
 
         //Notification?.Invoke(NotificationType.Info, $"Starting file transfer: {remoteFilename} ({length} bytes)");
         Console.WriteLine("Starting file transfer");
-        var startAck = await SendAndWaitAsync(_stream, start, "FileStartAck");
+        var startAck = await PacketIO.SendAndWaitAsync(_stream, start, "FileStartAck", pendingResponses);
         if (startAck == null)
         {
             return false;
@@ -887,7 +889,7 @@ class Server
         };
         //Notification?.Invoke(NotificationType.Info, "Sending file end packet...");
         Console.WriteLine("Sending file end packet");
-        var endAck = await SendAndWaitAsync(_stream, end, "FileEndAck");
+        var endAck = await PacketIO.SendAndWaitAsync(_stream, end, "FileEndAck", pendingResponses);
         if (endAck != null)
         {
             if (endAck.Headers["Status"] == "Error")
@@ -906,36 +908,6 @@ class Server
 
 
     }
-
-    public static async Task<Packet> SendAndWaitAsync(Socket socket, Packet packet, string expectedType)
-    {
-        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
-        pendingResponses[expectedType] = tcs;
-
-        await PacketIO.SendPacketAsync(socket, packet);
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        using (cts.Token.Register(() => tcs.TrySetCanceled()))
-        {
-            return await tcs.Task;
-        }
-    }
-
-    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType)
-    {
-        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
-        pendingResponses[expectedType] = tcs;
-
-        await PacketIO.SendPacketAsync(stream, packet);
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        using (cts.Token.Register(() => tcs.TrySetCanceled()))
-        {
-            return await tcs.Task;
-        }
-    }
-
-
 
     private static X509Certificate2 LoadServerCertificate()
     {

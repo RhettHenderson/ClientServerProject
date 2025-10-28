@@ -1,6 +1,9 @@
 ﻿using System.Net.Sockets;
 using System.Text.Json;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
+using System.Text;
+using System.Security.Cryptography;
 
 namespace Common;
 
@@ -230,6 +233,20 @@ public static class PacketIO
         return 0;
     }
 
+    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType, ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses)
+    {
+        var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pendingResponses[expectedType] = tcs;
+
+        await SendPacketAsync(stream, packet);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using (cts.Token.Register(() => tcs.TrySetCanceled()))
+        {
+            return await tcs.Task;
+        }
+    }
+
 }
 
 public class FileReceiveState
@@ -246,4 +263,19 @@ public enum PacketStatus
     Ok,
     Disconnected,
     Error
+}
+
+public static class Utility
+{
+    public static string SHA256Hash(string input)
+    {
+        SHA256 hasher = SHA256.Create();
+        byte[] hashValue = hasher.ComputeHash(Encoding.UTF8.GetBytes(input));
+        StringBuilder sb = new StringBuilder();
+        foreach (byte b in hashValue)
+        {
+            sb.Append(b.ToString("x2"));
+        }
+        return sb.ToString();
+    }
 }
