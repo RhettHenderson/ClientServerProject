@@ -10,5 +10,4 @@
 *.pfx
 
 #Any password and auth files should be kept local
-**/passwords.txt
-**/auth.txt
+**/*.txt
