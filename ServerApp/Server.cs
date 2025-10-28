@@ -30,13 +30,13 @@ class Server
     // === Connection Handling ===
     private sealed class Conn
     {
-        public Socket Socket { get; }
-        public Stream IO { get; }
+        public Socket socket { get; }
+        public Stream io { get; }
 
-        public Conn(Socket socket, Stream io)
+        public Conn(Socket s, Stream i)
         {
-            Socket = socket;
-            IO = io;
+            socket = s;
+            io = i;
         }
     }
 
