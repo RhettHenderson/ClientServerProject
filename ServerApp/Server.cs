@@ -46,8 +46,6 @@ class Server
     private static ConcurrentDictionary<string, string> passwords = new();
 
     private static ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new();
-    private static Packet startAck;
-    private static Packet endAck;
     private static Stream _stream = null;
     //File downloads in progress
     private static ConcurrentDictionary<string, FileReceiveState> files = new();
@@ -220,6 +218,14 @@ class Server
         //Step 1: Read headers to determine packet type
         //Types so far are "Message", "Command", "Ack", "Data"
         var type = headers["Type"];
+
+        //Before actually processing the packet, check pendingResponses
+        if (pendingResponses.TryRemove(type, out var tcs))
+        {
+            tcs.SetResult(incoming);
+            return true;
+        }
+
         switch (type)
         {
             case ("Message"):
@@ -411,12 +417,6 @@ class Server
                 await HandleFileEndAsync(conn.io, incoming);
                 Console.WriteLine("Received FileEnd packet");
                 return true;
-            case "FileStartAck":
-                startAck = incoming;
-                break;
-            case "FileEndAck":
-                endAck = incoming;
-                break;
             default:
                 Console.WriteLine($"Invalid packet header: {type}.");
                 break;
@@ -609,7 +609,11 @@ class Server
         var reply = new Packet
         {
             ClientID = "Server",
-            Headers = new Dictionary<string, string> { { "Type", "FileStartAck" }, { "Status", "Ok" }, { "FileKey", fullPath } },
+            Headers = new Dictionary<string, string> { 
+                { "Type", "FileStartAck" }, 
+                { "Status", "Ok" }, 
+                { "FileKey", fullPath } 
+            },
             Payload = Array.Empty<byte>()
         };
         if (File.Exists(fullPath) || files.ContainsKey(fullPath))
@@ -824,12 +828,7 @@ class Server
 
         //Notification?.Invoke(NotificationType.Info, $"Starting file transfer: {remoteFilename} ({length} bytes)");
         Console.WriteLine("Starting file transfer");
-
-        //commented out because sendandwait isn't working properly
-
-        //var startAck = await SendAndWaitAsync(_stream, start, "FileStartAck");
-        await PacketIO.SendPacketAsync(_stream, start);
-        await Task.Delay(500);
+        var startAck = await SendAndWaitAsync(_stream, start, "FileStartAck");
         if (startAck == null)
         {
             return false;
@@ -888,10 +887,7 @@ class Server
         };
         //Notification?.Invoke(NotificationType.Info, "Sending file end packet...");
         Console.WriteLine("Sending file end packet");
-        //send and wait isn't working properly
-        //var endAck = await SendAndWaitAsync(_stream, end, "FileEndAck");
-        await PacketIO.SendPacketAsync(_stream, end);
-        await Task.Delay(500);
+        var endAck = await SendAndWaitAsync(_stream, end, "FileEndAck");
         if (endAck != null)
         {
             if (endAck.Headers["Status"] == "Error")

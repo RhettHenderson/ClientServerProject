@@ -264,7 +264,7 @@ public class Client : IAsyncDisposable
 
         await PacketIO.SendPacketAsync(stream, packet);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using (cts.Token.Register(() => tcs.TrySetCanceled()))
         {
             return await tcs.Task;
