@@ -46,6 +46,12 @@ public class Client : IAsyncDisposable
         authFile = "auth.txt";
         await socket.ConnectAsync(new IPEndPoint(ip, port));
 
+
+        //=== UDP Networking TESTING ONLY ===
+        var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        //The IP and port we want to listen on for UDP packets
+        udp.Bind(new IPEndPoint(IPAddress.Any, 0));
+
         var net = new NetworkStream(socket, ownsSocket: true);
         var ssl = new SslStream(net, leaveInnerStreamOpen: false,
             userCertificateValidationCallback: (_, __, ___, ____) => true // DEV ONLY
@@ -60,7 +66,8 @@ public class Client : IAsyncDisposable
         _stream = ssl;
         Name = name;
 
-        var recvTask = Task.Run(() => ReceiveLoopAsync(ssl));
+        _ = Task.Run(() => ReceiveLoopAsync(ssl));
+        _ = Task.Run(() => UdpReceiveLoopAsync(udp));
 
         if (createUser)
         {
@@ -88,6 +95,19 @@ public class Client : IAsyncDisposable
             };
             await PacketIO.SendPacketAsync(ssl, authPacket);
         }
+
+        //===SEND UDP PACKETS (TESTING ONLY)===
+        Packet udpPacket = new Packet
+        {
+            ClientID = name,
+            Headers = new Dictionary<string, string>
+            {
+                {"Protocol", "UDP" },
+                {"Type", "Message" }
+            },
+            Payload = Encoding.UTF8.GetBytes("Hello via UDP!")
+        };
+        await UdpSendAsync(udp, ip, port, udpPacket);
     }
     public async Task ReceiveLoopAsync(Stream stream)
     {
@@ -96,10 +116,10 @@ public class Client : IAsyncDisposable
             while (true)
             {
                 var (status, packet) = await PacketIO.ReceivePacketAsync(stream);
-                var headers = packet.Headers;
-                var text = Encoding.UTF8.GetString(packet.Payload);
                 if (status == PacketStatus.Ok && packet != null)
                 {
+                    var headers = packet.Headers;
+                    var text = Encoding.UTF8.GetString(packet.Payload);
                     var type = headers["Type"];
 
                     if (pendingResponses.TryRemove(type, out var tcs))
@@ -191,6 +211,30 @@ public class Client : IAsyncDisposable
             Disconnected?.Invoke();
             try { stream.Dispose(); } catch { }
         }
+    }
+
+    public async Task UdpReceiveLoopAsync(Socket udp)
+    {
+        MessageReceived?.Invoke("System", "UDP listener started.");
+        var buf = new byte[1024];
+        EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+
+        while (true)
+        {
+            var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
+            var n = result.ReceivedBytes;
+            var from = result.RemoteEndPoint.ToString();
+            from = from ?? "Unknown";
+            var message = Encoding.UTF8.GetString(buf, 0, n);
+            MessageReceived?.Invoke($"UDP Message from {from}: ", message);
+        }
+    }
+
+    public async Task UdpSendAsync(Socket udp, IPAddress ip, int port, Packet packet)
+    {
+        MessageReceived?.Invoke("System", "Sending UDP packet.");
+        IPEndPoint remoteEndPoint = new IPEndPoint(ip, port);
+        await PacketIO.SendPacketToAsyncUdp(udp, packet, remoteEndPoint);
     }
 
     // === Client-Exclusive Messaging Functions

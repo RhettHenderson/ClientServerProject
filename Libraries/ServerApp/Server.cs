@@ -12,7 +12,7 @@ namespace Client_Server;
 public class Server : IAsyncDisposable
 {
     // === Networking ===
-    private static Socket listener;
+    private Socket listener;
     private static string Name = "Server";
 
     // === Connection Handling ===
@@ -99,6 +99,12 @@ public class Server : IAsyncDisposable
         listener = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         listener.Bind(localEndPoint);
         listener.Listen(10);
+
+        //=== UDP Networking TESTING ONLY ===
+        var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        //The IP and port we want to listen on for UDP packets
+        udp.Bind(new IPEndPoint(ipAddr, 11111));
+        _ = Task.Run(() => UdpReceiveLoopAsync(udp));
     }
 
     
@@ -120,6 +126,30 @@ public class Server : IAsyncDisposable
         {
             try { listener.Close(); } catch { }
         }
+    }
+
+    public async Task UdpReceiveLoopAsync(Socket udp)
+    {
+        MessageReceived?.Invoke("UDP Listener", "Started UDP receive loop.");
+        var buf = new byte[1024];
+        EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+
+        while (true)
+        {
+            var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
+            MessageReceived?.Invoke("UDP Listener", "Received UDP packet.");
+            Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
+            var from = (IPEndPoint)result.RemoteEndPoint;
+            MessageReceived?.Invoke("UDP Message from " + from.ToString() ?? "Unknown", Encoding.UTF8.GetString(packet.Payload));
+        }
+    }
+
+    public async Task UdpSendAsync(Socket udp, string ip, int port, string message)
+    {
+        IPAddress ipAddr = IPAddress.Parse(ip);
+        IPEndPoint remoteEndPoint = new IPEndPoint(ipAddr, port);
+        var buf = Encoding.UTF8.GetBytes(message);
+        await udp.SendToAsync(buf, SocketFlags.None, remoteEndPoint);
     }
     public async Task<int> WaitForConnectionAsync()
     {

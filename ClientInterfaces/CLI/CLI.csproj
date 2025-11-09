@@ -1,7 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-	  <ProjectReference Include="..\..\Libraries\**\*.csproj" />
+	  <ProjectReference Include="..\..\Libraries\ClientApp\ClientApp.csproj" />
+	  <ProjectReference Include="..\..\Libraries\Common\Common.csproj" />
   </ItemGroup>
   <PropertyGroup>
     <OutputType>Exe</OutputType>

@@ -1,13 +1,7 @@
-﻿using Microsoft.VisualBasic;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection.Metadata.Ecma335;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Text;
 using Common;
 
-namespace ClientApp;
+namespace Client_Server;
 
 class CLI
 {
