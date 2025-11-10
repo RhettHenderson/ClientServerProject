@@ -39,7 +39,7 @@ FULL := --self-contained true \
         build-server publish-server-win publish-server-linux publish-server-win-single publish-server-linux-single \
         publish-server-win-aot publish-server-linux-aot
 
-all: libraries build-server-cli
+all: libraries build-server-cli build-client-cli
 publish: client-cli-win server-cli-win client-cli-linux server-cli-linux
 full: client-cli-win-full server-cli-win-full client-cli-linux-full server-cli-linux-full
 
