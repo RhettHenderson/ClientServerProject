@@ -7,10 +7,28 @@
 <p>This project is licensed under the GNU General Public License (GPL).</p>
 
 ## Project Overview
-<p>This repository contains a <strong>Client-Server application</strong> built using C# with both <strong>GUI</strong> and <strong>CLI</strong> components. The application facilitates secure communication via <strong>SSL/TLS</strong> encryption. The <strong>GUI</strong> provides an intuitive interface for users, while the <strong>CLI</strong> offers the same functionality through command-line interactions. Both versions of the application rely on a shared backend to handle data transfer and encryption.</p>
-
+<p>This repository contains a <strong>Client-Server application</strong> built using C# with both <strong>GUI</strong> and <strong>CLI</strong> components. The application has secure communication via <strong>SSL/TLS</strong> encryption. The <strong>GUI</strong> provides an intuitive interface for users, while the <strong>CLI</strong> offers the same functionality through command-line interactions. Both versions of the application rely on a shared backend to handle data transfer and encryption. Currently, the GUI is in beta and lacks most features. Some in-development features and some planned future features are listed below.</p>
 <p>There are also pre-compiled binaries available in the <code>publish</code> folder for various platforms, allowing you to run the application without needing to build it yourself.</p>
 <p>In general, you shouldn't run random binaries you find on the internet, but if you want them, they're there.</p>
+
+## Features in development
+<p>1. VoIP using UDP</p>
+<p>2. File transfer and hosting</p>
+<p>3. WinForms GUI for the client app</p>
+
+## Features planned for the future
+<p>1. Full WinUI GUI to replace the WinForms.</p>
+<p>2. Full GUI for the server app</p>
+<p>3. SQLite database to store user credentials</p>
+<p>4. Session-awareness</p>
+<p>5. Better first-time setup process to set a server password and other options</p>
+
+## How to Run the Project
+
+<p>Clone or download the repository, then if you have Make installed, you can run <code>make publish</code> to publish the regular binaries or <code>make</code> to build the project solutions.</p>
+<p><strong>Before running, ensure these requirements are met:</strong></p>
+<p>1. Ensure there is a passwords.txt file next to the Server executable, and ensure it has atleast one username-password hash combo in this format: <code>name, hash</code></p>
+<p>2. Ensure you have a certificate setup. See below for instructions on installing a dotnet dev certificate.</p>
 
 ## Instructions for Setting Up SSL Certificates
 
