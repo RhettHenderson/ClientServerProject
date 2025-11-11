@@ -1,12 +1,14 @@
-﻿using System.Net;
+﻿using Common;
+using NAudio;
+using NAudio.Wave;
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
-using System.Collections.Concurrent;
-using Common;
-using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
-using System.Security.Authentication;
 
 namespace Client_Server;
 public class Server : IAsyncDisposable
@@ -58,6 +60,9 @@ public class Server : IAsyncDisposable
     public event Action<string>? Error;
     public event Action<NotificationType, string>? Notification;
 
+    // === Audio Playback ===
+    private static Pcm16Player? _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
+
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     // === Main Server Loop ===
@@ -66,7 +71,6 @@ public class Server : IAsyncDisposable
         Console.Title = "Server";
         await InitListener(ip);
 
-        //await AcceptLoopAsync();
         var acceptTask = AcceptLoopAsync();
         var consoleTask = Task.Run(() => RunServerConsoleAsync());
 
@@ -131,16 +135,15 @@ public class Server : IAsyncDisposable
     public async Task UdpReceiveLoopAsync(Socket udp)
     {
         MessageReceived?.Invoke("UDP Listener", "Started UDP receive loop.");
-        var buf = new byte[1024];
+        var buf = new byte[4096];
         EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
 
         while (true)
         {
             var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
-            MessageReceived?.Invoke("UDP Listener", "Received UDP packet.");
             Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
             var from = (IPEndPoint)result.RemoteEndPoint;
-            MessageReceived?.Invoke("UDP Message from " + from.ToString() ?? "Unknown", Encoding.UTF8.GetString(packet.Payload));
+            _player!.AddFrame(packet.Payload, 0, packet.Payload.Length);
         }
     }
 
@@ -180,7 +183,6 @@ public class Server : IAsyncDisposable
 
     public async Task HandleClientAsync(int id)
     {
-        Notification?.Invoke(NotificationType.Info, $"Client #{id} handler started.");
         //Sends the packet to tell the client what its id is
         while (true)
         {
@@ -204,7 +206,6 @@ public class Server : IAsyncDisposable
         {
             status = PacketStatus.Disconnected;
         }
-        Notification?.Invoke(NotificationType.Info, status.ToString());
         if (status == PacketStatus.Disconnected)
         {
             Notification?.Invoke(NotificationType.Warning, $"Client {id} forcibly disconnected");
@@ -366,7 +367,6 @@ public class Server : IAsyncDisposable
                         break;
                 }
                 break;
-               
             case "AuthCodeRequest":
                 //Passes a pointer so our global variable gets updated
                 Utility.GenerateAuthCode(ref currentAuthCode);
@@ -441,9 +441,6 @@ public class Server : IAsyncDisposable
                 await PacketIO.HandleFileEndAsync(conn.io, incoming, files, Name);
                 Notification?.Invoke(NotificationType.Info, "Received FileEnd packet");
                 return true;
-            case "Audio":
-                Notification?.Invoke(NotificationType.Info, "Received Audio packet");
-                break;
             default:
                 Notification?.Invoke(NotificationType.Warning, $"Invalid packet header: {type}.");
                 break;
@@ -478,7 +475,6 @@ public class Server : IAsyncDisposable
             Payload = Encoding.UTF8.GetBytes(id.ToString())
         };
         await PacketIO.SendPacketAsync(stream, pkt);
-        Notification?.Invoke(NotificationType.Info, $"Sent ID packet to client {id}");
 
         pkt.Headers = new Dictionary<string, string>
         {
@@ -488,7 +484,6 @@ public class Server : IAsyncDisposable
         pkt.Payload = cmdJson;
         await PacketIO.SendPacketAsync(stream, pkt);
         //Send a file upon connection (DEV PURPOSES)
-        Notification?.Invoke(NotificationType.Info, $"Sent commands packet to client {id}");
     }
 
     // === Client Authentication ===
@@ -623,5 +618,17 @@ public class Server : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         try { _stream?.Dispose(); } catch { }
+    }
+
+    static short MaxAbsPcm16(ReadOnlySpan<byte> buf)
+    {
+        short max = 0;
+        for (int i = 0; i + 1 < buf.Length; i += 2)
+        {
+            short s = (short)(buf[i] | (buf[i + 1] << 8)); // little-endian
+            short a = (short)Math.Abs(s);
+            if (a > max) max = a;
+        }
+        return max;
     }
 }

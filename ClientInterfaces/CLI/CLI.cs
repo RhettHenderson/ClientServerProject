@@ -35,7 +35,7 @@ class CLI
         string host = Console.ReadLine();
         if (string.IsNullOrWhiteSpace(host))
         {
-            host = "localhost";
+            host = "127.0.0.1";
         }
         //Check for auth file to skip asking for username and password
         string username = "";
@@ -67,6 +67,7 @@ class CLI
         }
         var hash = Utility.SHA256Hash(password);
 
+        Console.WriteLine($"Connection to server at {host}");
         await client.ConnectAsync(host, 11111, username, hash);
 
         Console.Title = client.Name;

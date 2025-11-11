@@ -1,7 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <Compile Include="..\..\ClientInterfaces\CLI\CLI.cs" Link="CLI.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
+	<TrimmerRootAssembly Include="NAudio" />
   </ItemGroup>
 
   <ItemGroup>

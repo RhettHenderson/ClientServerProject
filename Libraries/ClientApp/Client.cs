@@ -112,6 +112,7 @@ public class Client : IAsyncDisposable
             },
             Payload = Encoding.UTF8.GetBytes("Hello via UDP!")
         };
+        await StartListening(udp, ip, port);
         await UdpSendAsync(udp, ip, port, udpPacket);
     }
     public async Task ReceiveLoopAsync(Stream stream)
@@ -221,7 +222,7 @@ public class Client : IAsyncDisposable
     public async Task UdpReceiveLoopAsync(Socket udp)
     {
         MessageReceived?.Invoke("System", "UDP listener started.");
-        var buf = new byte[1024];
+        var buf = new byte[4096];
         EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
 
         while (true)
@@ -308,11 +309,12 @@ public class Client : IAsyncDisposable
     }
 
     // === Microphone Capturing ===
-    public async Task StartListening(Socket udp, string ip, int port)
+    public async Task StartListening(Socket udp, IPAddress ip, int port)
     {
-        var rec = new MicRecorder(bufferMs: 10);
+        Notification?.Invoke(NotificationType.Info, "Starting microphone capture...");
+        var rec = new MicRecorder(frameMs: 10);
         rec.Start();
-        var remote = new IPEndPoint(IPAddress.Parse(ip), port);
+        var remote = new IPEndPoint(ip, port);
 
         // === Sequencing ===
         uint seq = 0;
@@ -327,6 +329,16 @@ public class Client : IAsyncDisposable
             {
                 if (!rec.TryDequeue(out var frame) || frame is null)
                 {
+                    var packet = new Packet
+                    {
+                        ClientID = Name,
+                        Headers = new Dictionary<string, string>
+                        {
+                            { "Type", "Message" }
+                        },
+                        Payload = Encoding.UTF8.GetBytes("No audio frame available yet")
+                    };
+                    PacketIO.SendPacketToAsyncUdp(udp, packet, remote);
                     Thread.Sleep(1);
                     continue;
                 }
@@ -355,6 +367,7 @@ public class Client : IAsyncDisposable
                     };
 
                     // fire-and-forget is fine for UDP; you can queue or await if desired
+                    Notification?.Invoke(NotificationType.Info, $"Sending audio packet Seq={seq}, Ts={timestampSamples}, Size={take}");
                     PacketIO.SendPacketToAsyncUdp(udp, audio, remote);
 
                     // advance counters

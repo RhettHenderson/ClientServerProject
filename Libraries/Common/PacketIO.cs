@@ -1,11 +1,13 @@
-﻿using System.Buffers.Binary;
+﻿using NAudio.CoreAudioApi;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using NAudio.Wave;
 
 namespace Common;
 
@@ -149,14 +151,14 @@ public static class PacketIO
         int sent = 0;
         while (sent < len.Length)
         {
-            int n = await socket.SendAsync(new ReadOnlyMemory<byte>(len));
+            int n = await socket.SendAsync(new ReadOnlyMemory<byte>(len, sent, len.Length - sent), SocketFlags.None);
             if (n == 0) throw new IOException("Socket closed");
             sent += n;
         }
         sent = 0;
         while (sent < body.Length)
         {
-            int n = await socket.SendAsync(new ReadOnlyMemory<byte>(body));
+            int n = await socket.SendAsync(new ReadOnlyMemory<byte>(body, sent, body.Length - sent), SocketFlags.None);
             if (n == 0) throw new IOException("Socket closed");
             sent += n;
         }
@@ -210,7 +212,7 @@ public static class PacketIO
             {
                 return PacketStatus.Disconnected;
             }
-            if (r == 0) return PacketStatus.Error;
+            if (r == 0) return PacketStatus.Disconnected;
             received += r;
         }
         return 0;
@@ -559,53 +561,182 @@ public static class Utility
     }
 }
 
-public class MicRecorder : IDisposable
+public sealed class MicRecorder : IDisposable
 {
-    private readonly WaveInEvent waveIn;
-    private readonly ConcurrentQueue<byte[]> queue = new();
-    private bool started;
+    private readonly int frameMs;
+    private readonly int targetSampleRate = 48000;  // network format
+    private readonly int targetChannels = 1;      // mono
+    private readonly int targetBytesPerSample = 2;  // PCM16
 
-    //48kHz, 16 bits, mono-channel
-    private static readonly WaveFormat Format = new WaveFormat(48000, 16, 1);
+    private MMDevice? device;
+    private WasapiCapture? capture;                 // default input in shared mode
+    private BufferedWaveProvider? buffered;         // holds native device format
+    private IWaveProvider? wave16Mono48;            // converted → PCM16 mono 48k
 
-    public MicRecorder(int deviceNumber = 0, int bufferMs = 10)
+    private readonly ConcurrentQueue<byte[]> frames = new();
+    private Thread? worker;
+    private volatile bool started;
+    private volatile bool disposing;
+
+    public MicRecorder(int frameMs = 20, DataFlow endpoint = DataFlow.Capture, Role role = Role.Communications)
     {
-        waveIn = new WaveInEvent
-        {
-            DeviceNumber = deviceNumber,      // default recording device
-            WaveFormat = Format,
-            BufferMilliseconds = bufferMs // ~20 ms chunks
-        };
-        waveIn.DataAvailable += OnDataAvailable;
-        waveIn.RecordingStopped += (_, __) => started = false;
+        if (frameMs != 10 && frameMs != 20) throw new ArgumentException("Use 10 or 20 ms frames for VoIP.");
+        this.frameMs = frameMs;
+
+        var enumerator = new MMDeviceEnumerator();
+        device = enumerator.GetDefaultAudioEndpoint(endpoint, role);
+        // If you want the “default multimedia” mic, pass Role.Multimedia instead.
     }
 
     public void Start()
     {
         if (started) return;
-        waveIn.StartRecording();
+
+        if (device == null) throw new InvalidOperationException("No default capture device.");
+
+        // Initialize capture (shared mode, event sync off for simplicity; latency ~20ms)
+        capture = new WasapiCapture(device, false, frameMs);
+        // Capture format is device-native (often float 32-bit, stereo, 48k)
+        var inputFormat = capture.WaveFormat;
+        Console.WriteLine($"[WASAPI] Device: {device.FriendlyName}");
+        Console.WriteLine($"[WASAPI] Native format: {inputFormat.SampleRate} Hz, {inputFormat.BitsPerSample}-bit, {inputFormat.Channels} ch, {inputFormat.Encoding}");
+
+        buffered = new BufferedWaveProvider(inputFormat)
+        {
+            DiscardOnBufferOverflow = true,
+            BufferDuration = TimeSpan.FromMilliseconds(500) // headroom for jitter
+        };
+
+        // 1) Push raw captured bytes into a buffer (native format)
+        capture.DataAvailable += (s, a) =>
+        {
+            if (a.BytesRecorded > 0) buffered!.AddSamples(a.Buffer, 0, a.BytesRecorded);
+        };
+        capture.RecordingStopped += (s, e) =>
+        {
+            started = false;
+            if (e.Exception != null) Console.WriteLine("[WASAPI] RecordingStopped error: " + e.Exception);
+            else Console.WriteLine("[WASAPI] RecordingStopped");
+        };
+
+        // 2) Build the conversion chain → PCM16 / MONO / 48k
+        //    a) to sample provider (always float)
+        ISampleProvider sp = buffered.ToSampleProvider();
+        //    b) if stereo, downmix to mono
+        if (sp.WaveFormat.Channels > 1)
+        {
+            sp = new StereoToMonoSampleProvider(sp)
+            {
+                LeftVolume = 0.5f,
+                RightVolume = 0.5f
+            };
+        }
+        //    c) resample to 48k if needed
+        if (sp.WaveFormat.SampleRate != targetSampleRate)
+        {
+            sp = new WdlResamplingSampleProvider(sp, targetSampleRate);
+        }
+        //    d) float → PCM16
+        wave16Mono48 = new SampleToWaveProvider16(sp); // IWaveProvider(Read bytes)
+
+        // 3) Start capture
+        capture.StartRecording();
         started = true;
+        Console.WriteLine($"[WASAPI] Started. Target: {targetSampleRate} Hz, PCM16, mono. Frame {frameMs} ms");
+
+        // 4) Chunker thread: reads fixed-size frames and enqueues
+        int bytesPerFrame = targetSampleRate * targetChannels * targetBytesPerSample * frameMs / 1000;
+        worker = new Thread(() => ChunkLoop(bytesPerFrame)) { IsBackground = true, Name = "WasapiChunker" };
+        worker.Start();
+    }
+
+    private void ChunkLoop(int bytesPerFrame)
+    {
+        var buf = new byte[bytesPerFrame];
+
+        // Helpful threshold to avoid tiny reads: about 2 frames worth
+        int minReadable = bytesPerFrame * 2;
+
+        while (!disposing && started)
+        {
+            try
+            {
+                // Wait until there's enough audio buffered in the upstream provider
+                // We only know the buffered bytes at the *BufferedWaveProvider* stage,
+                // but wave16Mono48 pulls from that pipeline, so this is a decent proxy.
+                var bufferedBytes = buffered!.BufferedBytes;
+                if (bufferedBytes < minReadable)
+                {
+                    Thread.Sleep(2);
+                    continue;
+                }
+
+                int read = wave16Mono48!.Read(buf, 0, buf.Length);
+                if (read == buf.Length)
+                {
+                    // Copy to avoid reuse
+                    var frame = new byte[read];
+                    Buffer.BlockCopy(buf, 0, frame, 0, read);
+                    frames.Enqueue(frame);
+                }
+                else
+                {
+                    // Underflow or end — back off briefly
+                    Thread.Sleep(2);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[WASAPI] ChunkLoop error: " + ex.Message);
+                Thread.Sleep(10);
+            }
+        }
     }
 
     public void Stop()
     {
         if (!started) return;
-        waveIn?.StopRecording();
+        try { capture?.StopRecording(); } catch { }
         started = false;
     }
 
-    public bool TryDequeue(out byte[]? buffer) => queue.TryDequeue(out buffer);
-
-    private void OnDataAvailable(object? sender, WaveInEventArgs e)
-    {
-        var frame = new byte[e.BytesRecorded];
-        Buffer.BlockCopy(e.Buffer, 0, frame, 0, e.BytesRecorded);
-        queue.Enqueue(frame);
-    }
+    public bool TryDequeue(out byte[]? buffer) => frames.TryDequeue(out buffer);
 
     public void Dispose()
     {
+        disposing = true;
         Stop();
-        waveIn.Dispose();
+        try { worker?.Join(200); } catch { }
+        capture?.Dispose();
+        device?.Dispose();
+    }
+}
+
+public sealed class Pcm16Player : IDisposable
+{
+    private readonly WaveFormat fmt = new WaveFormat(48000, 16, 1); // 48k / 16-bit / mono
+    private readonly WaveOutEvent outDev;
+    private readonly BufferedWaveProvider buffer;
+
+    public Pcm16Player(int latencyMs = 100, int jitterMs = 500)
+    {
+        buffer = new BufferedWaveProvider(fmt)
+        {
+            DiscardOnBufferOverflow = true,
+            BufferDuration = TimeSpan.FromMilliseconds(jitterMs)
+        };
+        outDev = new WaveOutEvent { DesiredLatency = latencyMs };
+        outDev.Init(buffer);
+        outDev.Play();
+        Console.WriteLine("[AUDIO] Playback ready.");
+    }
+
+    public void AddFrame(byte[] frame, int offset, int count)
+        => buffer.AddSamples(frame, offset, count);
+
+    public void Dispose()
+    {
+        outDev?.Stop();
+        outDev?.Dispose();
     }
 }
