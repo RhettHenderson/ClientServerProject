@@ -441,6 +441,9 @@ public class Server : IAsyncDisposable
                 await PacketIO.HandleFileEndAsync(conn.io, incoming, files, Name);
                 Notification?.Invoke(NotificationType.Info, "Received FileEnd packet");
                 return true;
+            case "Audio":
+                Notification?.Invoke(NotificationType.Info, "Received Audio packet");
+                break;
             default:
                 Notification?.Invoke(NotificationType.Warning, $"Invalid packet header: {type}.");
                 break;

@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using NAudio.Wave;
 
 namespace Common;
 
@@ -131,6 +132,11 @@ public static class PacketIO
 
     public static async Task SendPacketAsyncUdp(Socket socket, Packet packet)
     {
+        if (!socket.Connected)
+        {
+            throw new InvalidOperationException("Socket must be connected to an endpoint to use SendPacketAsyncUdp. " +
+                "Call socket.Connect(endpoint) first or use SendPacketToAsyncUdp() instead");
+        }
         byte[] dgram = SerializeForUdp(packet);
         await socket.SendAsync(dgram, SocketFlags.None);
     }
@@ -550,5 +556,56 @@ public static class Utility
 
         // 5) Normalize (removes ., .., mixed separators) and return
         return Path.GetFullPath(path);
+    }
+}
+
+public class MicRecorder : IDisposable
+{
+    private readonly WaveInEvent waveIn;
+    private readonly ConcurrentQueue<byte[]> queue = new();
+    private bool started;
+
+    //48kHz, 16 bits, mono-channel
+    private static readonly WaveFormat Format = new WaveFormat(48000, 16, 1);
+
+    public MicRecorder(int deviceNumber = 0, int bufferMs = 10)
+    {
+        waveIn = new WaveInEvent
+        {
+            DeviceNumber = deviceNumber,      // default recording device
+            WaveFormat = Format,
+            BufferMilliseconds = bufferMs // ~20 ms chunks
+        };
+        waveIn.DataAvailable += OnDataAvailable;
+        waveIn.RecordingStopped += (_, __) => started = false;
+    }
+
+    public void Start()
+    {
+        if (started) return;
+        waveIn.StartRecording();
+        started = true;
+    }
+
+    public void Stop()
+    {
+        if (!started) return;
+        waveIn?.StopRecording();
+        started = false;
+    }
+
+    public bool TryDequeue(out byte[]? buffer) => queue.TryDequeue(out buffer);
+
+    private void OnDataAvailable(object? sender, WaveInEventArgs e)
+    {
+        var frame = new byte[e.BytesRecorded];
+        Buffer.BlockCopy(e.Buffer, 0, frame, 0, e.BytesRecorded);
+        queue.Enqueue(frame);
+    }
+
+    public void Dispose()
+    {
+        Stop();
+        waveIn.Dispose();
     }
 }

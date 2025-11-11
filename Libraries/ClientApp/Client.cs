@@ -7,6 +7,9 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using System;
+using NAudio.Wave;
+using System.Xml.Linq;
 
 namespace Client_Server;
 public class Client : IAsyncDisposable
@@ -14,6 +17,8 @@ public class Client : IAsyncDisposable
     // === Static Fields ===
     private static readonly string defaultSaveDir = @"C:\Users\rhett\Documents\downloads";
     private static readonly ConcurrentDictionary<string, FileReceiveState> files = new(); // Current downloads in progress
+
+    // === Microphone Fields ===
 
     // === Instance Fields ===
     private int id = -1;
@@ -300,6 +305,68 @@ public class Client : IAsyncDisposable
         {
             return false;
         }
+    }
+
+    // === Microphone Capturing ===
+    public async Task StartListening(Socket udp, string ip, int port)
+    {
+        var rec = new MicRecorder(bufferMs: 10);
+        rec.Start();
+        var remote = new IPEndPoint(IPAddress.Parse(ip), port);
+
+        // === Sequencing ===
+        uint seq = 0;
+        int timestampSamples = 0;
+        const int bytesPerSample = 2;
+        const int samplesPer10ms = 480;
+        const int maxFrameBytes = samplesPer10ms * bytesPerSample;
+
+        var senderThread = new Thread(() =>
+        {
+            while (true)
+            {
+                if (!rec.TryDequeue(out var frame) || frame is null)
+                {
+                    Thread.Sleep(1);
+                    continue;
+                }
+
+                // 2) Split any frame larger than 960 bytes into 10 ms slices
+                int offset = 0;
+                while (offset < frame.Length)
+                {
+                    int take = Math.Min(maxFrameBytes, frame.Length - offset);
+                    var slice = new byte[take];
+                    Buffer.BlockCopy(frame, offset, slice, 0, take);
+
+                    // 3) Add minimal sequencing metadata (headers) for VoIP
+                    var audio = new Packet
+                    {
+                        ClientID = Name, // your ID string
+                        Headers = new Dictionary<string, string>
+                        {
+                            { "Type", "Audio" },
+                            { "Protocol", "UDP" },
+                            { "Seq", seq.ToString() },
+                            { "Ts",  timestampSamples.ToString() }, // samples @ 48k
+                            { "Fmt", "PCM16_48k_Mono" }
+                        },
+                        Payload = slice
+                    };
+
+                    // fire-and-forget is fine for UDP; you can queue or await if desired
+                    PacketIO.SendPacketToAsyncUdp(udp, audio, remote);
+
+                    // advance counters
+                    seq++;
+                    timestampSamples += take / bytesPerSample;
+
+                    offset += take;
+                }
+            }
+        })
+        { IsBackground = true, Name = "VoIP MicSender" }; 
+        senderThread.Start();
     }
 
     // === IDisposable Implementation ===
