@@ -162,34 +162,40 @@ public class Server : IAsyncDisposable
         client.NoDelay = true;
 
         var net = new NetworkStream(client, ownsSocket: true);
-        var ssl = new SslStream(net, leaveInnerStreamOpen: false);
-        //Try to load, if it throws, then fallback to non-SSL
-        try {
-            X509Certificate2 cert = LoadServerCertificate();
+        Stream stream = net;
+
+        try
+        {
+            var cert = LoadServerCertificate();
+            var ssl = new SslStream(net, leaveInnerStreamOpen: false);
+
+            await ssl.AuthenticateAsServerAsync(
+                serverCertificate: cert,
+                clientCertificateRequired: false,
+                enabledSslProtocols: SslProtocols.Tls12 | SslProtocols.Tls13,
+                checkCertificateRevocation: true
+            );
+
+            stream = ssl;
+            Notification?.Invoke(NotificationType.Info, "SSL certificate loaded successfully. Using encrypted connection.");
         }
-        catch (InvalidOperationException e) {
-            Notification?.Invoke(NotificationType.Warning, 
-            "WARNING: SSL certificate is not present. \
-            Ignore this if you intend to use it unencrypted, \
-            otherwise refer to the README for instructions on setting up a dev certificate.");
+        catch (InvalidOperationException)
+        {
+            Notification?.Invoke(NotificationType.Warning,
+                "WARNING: SSL certificate is not present. " +
+                "Ignore this if you intend to use it unencrypted, otherwise refer to the README for instructions on setting up a dev certificate.");
+            stream = net; // Fallback to non-SSL
         }
-        catch (Exception e) {
-            Notification?.Invoke(NotificationType.Error, $"Unknown error encoutnered: {e.Message}. Terminating process.");
-            Notifcation?.Invoke(NotificationType.Warning, "Press any key to close this window.");
-            Console.ReadLine();
-            Environment.Exit(1);
+        catch (Exception e)
+        {
+            Notification?.Invoke(NotificationType.Error, $"Failed to establish SSL: {e.Message}. Falling back to unencrypted connection.");
+            stream = net; // Fallback to non-SSL
         }
 
-        await ssl.AuthenticateAsServerAsync(
-            serverCertificate: cert,
-            clientCertificateRequired: false,
-            enabledSslProtocols: SslProtocols.Tls12 | SslProtocols.Tls13,
-            checkCertificateRevocation: true
-        );
-        _stream = ssl;
+        _stream = stream;
 
         int id = Interlocked.Increment(ref nextID);
-        clients[id] = new Conn(client, ssl);
+        clients[id] = new Conn(client, stream);
         Notification?.Invoke(NotificationType.Info, $"Client #{id} connected.");
         return id;
     }
