@@ -163,8 +163,22 @@ public class Server : IAsyncDisposable
 
         var net = new NetworkStream(client, ownsSocket: true);
         var ssl = new SslStream(net, leaveInnerStreamOpen: false);
-        //TODO: load certificate
-        X509Certificate2 cert = LoadServerCertificate();
+        //Try to load, if it throws, then fallback to non-SSL
+        try {
+            X509Certificate2 cert = LoadServerCertificate();
+        }
+        catch (InvalidOperationException e) {
+            Notification?.Invoke(NotificationType.Warning, 
+            "WARNING: SSL certificate is not present. \
+            Ignore this if you intend to use it unencrypted, \
+            otherwise refer to the README for instructions on setting up a dev certificate.");
+        }
+        catch (Exception e) {
+            Notification?.Invoke(NotificationType.Error, $"Unknown error encoutnered: {e.Message}. Terminating process.");
+            Notifcation?.Invoke(NotificationType.Warning, "Press any key to close this window.");
+            Console.ReadLine();
+            Environment.Exit(1);
+        }
 
         await ssl.AuthenticateAsServerAsync(
             serverCertificate: cert,
