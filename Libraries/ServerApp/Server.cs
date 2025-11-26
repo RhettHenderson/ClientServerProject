@@ -407,19 +407,21 @@ public class Server : IAsyncDisposable
                     case AuthenticationStatus.WrongPassword:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} used the wrong password. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
+                        reply.Payload = Encoding.UTF8.GetBytes("Incorrect password.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
                         RemoveClient(id);
                         return false;
                     case AuthenticationStatus.WrongUsername:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} tried to login as non-existent user {clientID}. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
+                        reply.Payload = Encoding.UTF8.GetBytes("No account with that username exists.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
                         RemoveClient(id);
                         return false;
                     case AuthenticationStatus.AlreadyLoggedIn:
                         Notification?.Invoke(NotificationType.Warning, $"User {clientID} is already logged in. Rejecting client {id}.");
                         reply.Headers["Type"] = "AuthFailure";
-                        reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.AlreadyLoggedIn.ToString());
+                        reply.Payload = Encoding.UTF8.GetBytes("Another user is already logged in with that account.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
                         RemoveClient(id);
                         return false;
