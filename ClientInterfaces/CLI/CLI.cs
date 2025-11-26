@@ -112,6 +112,10 @@ class CLI
                 }
                 await PacketIO.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
             }
+            else if (line.StartsWith("--voice"))
+            {
+                await client.SendVoiceInviteAsync();
+            }
             else if (line.StartsWith("--"))
             {
                  await client.SendCommandAsync(line[2..]);

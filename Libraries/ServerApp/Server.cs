@@ -9,6 +9,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 
 namespace Client_Server;
 public class Server : IAsyncDisposable
@@ -50,6 +51,11 @@ public class Server : IAsyncDisposable
     private static int nextID = 0;
     private static readonly string[] commands = { "help", "whisper", "w" };
     private static readonly byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands, CommonJsonContext.Default.StringArray);
+    private IPAddress? listeningIp;
+    private int listeningPort = 11111;
+    private Socket? udp;
+    private int? pendingVoiceClientId;
+    private CancellationTokenSource? voiceInviteCts;
 
     // === Events and Actions ===
     public event Action<string, string>? MessageReceived;   // (from, text)
@@ -98,17 +104,13 @@ public class Server : IAsyncDisposable
                 throw;
             }
         }
-        IPEndPoint localEndPoint = new IPEndPoint(ipAddr, 11111);
+        listeningIp = ipAddr;
+        listeningPort = 11111;
+        IPEndPoint localEndPoint = new IPEndPoint(ipAddr, listeningPort);
         //Create TCP Socket
         listener = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         listener.Bind(localEndPoint);
         listener.Listen(10);
-
-        //=== UDP Networking TESTING ONLY ===
-        var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        //The IP and port we want to listen on for UDP packets
-        udp.Bind(new IPEndPoint(ipAddr, 11111));
-        _ = Task.Run(() => UdpReceiveLoopAsync(udp));
     }
 
     
@@ -130,6 +132,18 @@ public class Server : IAsyncDisposable
         {
             try { listener.Close(); } catch { }
         }
+    }
+
+    private void StartUdpListenerIfNeeded()
+    {
+        if (udp != null || listeningIp is null)
+        {
+            return;
+        }
+
+        udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        udp.Bind(new IPEndPoint(listeningIp, listeningPort));
+        _ = Task.Run(() => UdpReceiveLoopAsync(udp));
     }
 
     public async Task UdpReceiveLoopAsync(Socket udp)
@@ -342,10 +356,47 @@ public class Server : IAsyncDisposable
                         await PacketIO.SendPacketAsync(conn.io, reply);
                         return true;
                 }
+            case "VoiceInvite":
+                Notification?.Invoke(NotificationType.Info, $"Received voice invite from client {id}.");
+                pendingVoiceClientId = id;
+                voiceInviteCts?.Cancel();
+                voiceInviteCts = new CancellationTokenSource();
+                var cts = voiceInviteCts;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(3), cts.Token);
+                        if (cts.IsCancellationRequested || pendingVoiceClientId != id)
+                        {
+                            return;
+                        }
+
+                        pendingVoiceClientId = null;
+                        voiceInviteCts = null;
+                        var expirePacket = new Packet
+                        {
+                            ClientID = "Server",
+                            Headers = new Dictionary<string, string> { { "Type", "VoiceInviteExpired" } },
+                            Payload = Array.Empty<byte>()
+                        };
+
+                        if (clients.TryGetValue(id, out var inviteConn))
+                        {
+                            await PacketIO.SendPacketAsync(inviteConn.io, expirePacket);
+                        }
+
+                        Notification?.Invoke(NotificationType.Warning, "Voice invite expired after 3 minutes.");
+                    }
+                    catch (TaskCanceledException)
+                    {
+                    }
+                });
+                return true;
             case "Ack":
                 Notification?.Invoke(NotificationType.Info, $"Received ACK from client {id}.");
                 //Sets the client's name
-                names[clientID] = id; 
+                names[clientID] = id;
                 return true;
             case "Pos":
                 //Position update packet
@@ -611,7 +662,7 @@ public class Server : IAsyncDisposable
            var parts = line[2..].Split(' ');
            var cmd = parts[0];
            var args = parts.Skip(1).ToArray();
-           switch (cmd)
+            switch (cmd)
             {
                 case "setSaveDir":
                     if (args.Length != 1)
@@ -626,6 +677,36 @@ public class Server : IAsyncDisposable
                 case "file":
                     //skip verification for now
                     await PacketIO.SendFileAsync(_stream, args[0], pendingResponses);
+                    return;
+                case "accept":
+                    if (pendingVoiceClientId is null)
+                    {
+                        Notification?.Invoke(NotificationType.Info, "No pending voice invite to accept.");
+                        return;
+                    }
+
+                    var inviteId = pendingVoiceClientId.Value;
+                    pendingVoiceClientId = null;
+                    voiceInviteCts?.Cancel();
+                    voiceInviteCts = null;
+
+                    if (clients.TryGetValue(inviteId, out var inviteConn))
+                    {
+                        var acceptPacket = new Packet
+                        {
+                            ClientID = "Server",
+                            Headers = new Dictionary<string, string> { { "Type", "VoiceAccepted" } },
+                            Payload = Array.Empty<byte>()
+                        };
+
+                        await PacketIO.SendPacketAsync(inviteConn.io, acceptPacket);
+                        StartUdpListenerIfNeeded();
+                        Notification?.Invoke(NotificationType.Info, "Voice invite accepted. UDP listener started.");
+                    }
+                    else
+                    {
+                        Notification?.Invoke(NotificationType.Warning, "Client disconnected before invite could be accepted.");
+                    }
                     return;
                 default:
                     Notification?.Invoke(NotificationType.Info, "Unknown command.");
