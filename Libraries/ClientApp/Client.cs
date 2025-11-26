@@ -58,20 +58,53 @@ public class Client : IAsyncDisposable
         udp.Bind(new IPEndPoint(IPAddress.Any, 0));
 
         var net = new NetworkStream(socket, ownsSocket: true);
-        var ssl = new SslStream(net, leaveInnerStreamOpen: false,
-            userCertificateValidationCallback: (_, __, ___, ____) => true // DEV ONLY
-        );
-        await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+        Stream stream = net;
+
+        try
         {
-            TargetHost = "localhost",
-            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-            CertificateRevocationCheckMode = X509RevocationMode.NoCheck
-        });
+            var ssl = new SslStream(net, leaveInnerStreamOpen: false,
+                userCertificateValidationCallback: (_, __, ___, ____) => true // DEV ONLY
+            );
+
+            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck
+            });
+
+            stream = ssl;
+        }
+        catch (AuthenticationException)
+        {
+            Notification?.Invoke(NotificationType.Warning, "SSL negotiation failed. Falling back to unencrypted connection.");
+
+            try { stream.Dispose(); } catch { }
+            try { socket.Dispose(); } catch { }
+
+            socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+            await socket.ConnectAsync(new IPEndPoint(ip, port));
+            net = new NetworkStream(socket, ownsSocket: true);
+            stream = net;
+        }
+        catch (IOException)
+        {
+            Notification?.Invoke(NotificationType.Warning, "SSL negotiation failed due to IO error. Falling back to unencrypted connection.");
+
+            try { stream.Dispose(); } catch { }
+            try { socket.Dispose(); } catch { }
+
+            socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+            await socket.ConnectAsync(new IPEndPoint(ip, port));
+            net = new NetworkStream(socket, ownsSocket: true);
+            stream = net;
+        }
+
         //Store it in a global so we can dispose it later
-        _stream = ssl;
+        _stream = stream;
         Name = name;
 
-        _ = Task.Run(() => ReceiveLoopAsync(ssl));
+        _ = Task.Run(() => ReceiveLoopAsync(stream));
         _ = Task.Run(() => UdpReceiveLoopAsync(udp));
 
         if (createUser)
@@ -82,10 +115,10 @@ public class Client : IAsyncDisposable
                 Headers = new Dictionary<string, string> { { "Type", "AuthCodeRequest" } },
                 Payload = Array.Empty<byte>()
             };
-            await PacketIO.SendPacketAsync(ssl, authCodeRequest);
+            await PacketIO.SendPacketAsync(stream, authCodeRequest);
 
             //Add an if statement here and a way to show an error in the UI later
-            await CreateNewUser(name, ssl, passwordHash, authCode);
+            await CreateNewUser(name, stream, passwordHash, authCode);
         }
         else
         {
@@ -98,7 +131,7 @@ public class Client : IAsyncDisposable
                 },
                 Payload = Encoding.UTF8.GetBytes(passwordHash ?? "")
             };
-            await PacketIO.SendPacketAsync(ssl, authPacket);
+            await PacketIO.SendPacketAsync(stream, authPacket);
         }
 
         //===SEND UDP PACKETS (TESTING ONLY)===
