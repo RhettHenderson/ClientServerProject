@@ -205,7 +205,7 @@ public class Client : IAsyncDisposable
                             break;
 
                         case ("AuthFailure"):
-                            Error?.Invoke("Incorrect username or password. Connection closed.");
+                            Error?.Invoke($"Authentication Error: {text}.");
                             Disconnected?.Invoke();
                             stream.Dispose();
                             return;
