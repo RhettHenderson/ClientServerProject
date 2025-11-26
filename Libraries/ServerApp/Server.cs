@@ -158,6 +158,12 @@ public class Server : IAsyncDisposable
             var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
             Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
             var from = (IPEndPoint)result.RemoteEndPoint;
+            if (!packet.Headers.TryGetValue("Type", out var type) || type != "Audio")
+            {
+                Notification?.Invoke(NotificationType.Info, $"Ignoring non-audio UDP packet from {from}");
+                continue;
+            }
+
             _player!.AddFrame(packet.Payload, 0, packet.Payload.Length);
         }
     }
