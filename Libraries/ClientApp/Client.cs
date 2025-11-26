@@ -24,6 +24,9 @@ public class Client : IAsyncDisposable
     private int id = -1;
     private bool userExists = false;
     private string[] commands = Array.Empty<string>();
+    private IPAddress? serverIp;
+    private int serverPort;
+    private Socket? udp;
 
     // === Public Properties ===
     public string Name { get; private set; }
@@ -47,15 +50,11 @@ public class Client : IAsyncDisposable
     public async Task ConnectAsync(string host, int port, string name, string? passwordHash, bool createUser = false, Func<Task<string?>>? requestAuthCode = null, string authCode = "")
     {
         var ip = IPAddress.TryParse(host, out var ipAddr) ? ipAddr : IPAddress.Loopback;
+        serverIp = ip;
+        serverPort = port;
         var socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         authFile = "auth.txt";
         await socket.ConnectAsync(new IPEndPoint(ip, port));
-
-
-        //=== UDP Networking TESTING ONLY ===
-        var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        //The IP and port we want to listen on for UDP packets
-        udp.Bind(new IPEndPoint(IPAddress.Any, 0));
 
         var net = new NetworkStream(socket, ownsSocket: true);
         Stream stream = net;
@@ -105,7 +104,6 @@ public class Client : IAsyncDisposable
         Name = name;
 
         _ = Task.Run(() => ReceiveLoopAsync(stream));
-        _ = Task.Run(() => UdpReceiveLoopAsync(udp));
 
         if (createUser)
         {
@@ -133,20 +131,6 @@ public class Client : IAsyncDisposable
             };
             await PacketIO.SendPacketAsync(stream, authPacket);
         }
-
-        //===SEND UDP PACKETS (TESTING ONLY)===
-        Packet udpPacket = new Packet
-        {
-            ClientID = name,
-            Headers = new Dictionary<string, string>
-            {
-                {"Protocol", "UDP" },
-                {"Type", "Message" }
-            },
-            Payload = Encoding.UTF8.GetBytes("Hello via UDP!")
-        };
-        await StartListening(udp, ip, port);
-        await UdpSendAsync(udp, ip, port, udpPacket);
     }
     public async Task ReceiveLoopAsync(Stream stream)
     {
@@ -174,6 +158,13 @@ public class Client : IAsyncDisposable
                             {
                                 MessageReceived?.Invoke(packet.ClientID, text);
                             }
+                            break;
+                        case ("VoiceAccepted"):
+                            Notification?.Invoke(NotificationType.Info, "Voice invite accepted. Starting UDP connection.");
+                            await StartUdpConnectionAsync();
+                            break;
+                        case ("VoiceInviteExpired"):
+                            Notification?.Invoke(NotificationType.Warning, "Voice invite expired before it was accepted.");
                             break;
                         case ("Whisper"):
                             WhisperReceived?.Invoke(packet.ClientID, text);
@@ -274,6 +265,45 @@ public class Client : IAsyncDisposable
         MessageReceived?.Invoke("System", "Sending UDP packet.");
         IPEndPoint remoteEndPoint = new IPEndPoint(ip, port);
         await PacketIO.SendPacketToAsyncUdp(udp, packet, remoteEndPoint);
+    }
+
+    public async Task SendVoiceInviteAsync()
+    {
+        if (_stream is null) throw new InvalidOperationException("Not connected.");
+
+        await PacketIO.SendPacketAsync(_stream, new Packet
+        {
+            ClientID = Name,
+            Headers = new Dictionary<string, string> { { "Type", "VoiceInvite" } },
+            Payload = Array.Empty<byte>()
+        });
+    }
+
+    private async Task StartUdpConnectionAsync()
+    {
+        if (udp != null || serverIp is null)
+        {
+            return;
+        }
+
+        udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        udp.Bind(new IPEndPoint(IPAddress.Any, 0));
+
+        _ = Task.Run(() => UdpReceiveLoopAsync(udp));
+
+        Packet udpPacket = new Packet
+        {
+            ClientID = Name,
+            Headers = new Dictionary<string, string>
+            {
+                {"Protocol", "UDP" },
+                {"Type", "Message" }
+            },
+            Payload = Encoding.UTF8.GetBytes("Hello via UDP!")
+        };
+
+        await StartListening(udp, serverIp, serverPort);
+        await UdpSendAsync(udp, serverIp, serverPort, udpPacket);
     }
 
     // === Client-Exclusive Messaging Functions
