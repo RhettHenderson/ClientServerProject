@@ -392,16 +392,6 @@ public class Client : IAsyncDisposable
             {
                 if (!rec.TryDequeue(out var frame) || frame is null)
                 {
-                    var packet = new Packet
-                    {
-                        ClientID = Name,
-                        Headers = new Dictionary<string, string>
-                        {
-                            { "Type", "Message" }
-                        },
-                        Payload = Encoding.UTF8.GetBytes("No audio frame available yet")
-                    };
-                    PacketIO.SendPacketToAsyncUdp(udp, packet, remote);
                     Thread.Sleep(1);
                     continue;
                 }
