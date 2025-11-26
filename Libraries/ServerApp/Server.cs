@@ -10,6 +10,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Linq;
 
 namespace Client_Server;
 public class Server : IAsyncDisposable
@@ -243,23 +244,13 @@ public class Server : IAsyncDisposable
         if (status == PacketStatus.Disconnected)
         {
             Notification?.Invoke(NotificationType.Warning, $"Client {id} forcibly disconnected");
-            if (clients.TryRemove(id, out conn))
-            {
-                try { conn.io.Dispose(); } catch { }
-                try { conn.socket.Dispose(); } catch { }
-            }
-            clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
+            RemoveClient(id);
             return false;
         }
         else if (status == PacketStatus.Error)
         {
             Error?.Invoke("An error occured trying to receive the last packet. Closing connection.");
-            if (clients.TryRemove(id, out conn))
-            {
-                try { conn.io.Dispose(); } catch { }
-                try { conn.socket.Dispose(); } catch { }
-            }
-            clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
+            RemoveClient(id);
             return false;
         }
         //if we reach here status is Ok
@@ -406,33 +397,31 @@ public class Server : IAsyncDisposable
                 return true;
             case "Auth":
                 //Authentication packet containing the client's password
-                switch (await AuthenticateClient(clientID, text))
+                switch (await AuthenticateClient(clientID, text, id))
                 {
                     case AuthenticationStatus.Success:
                         Notification?.Invoke(NotificationType.Info, $"Client {id} authenticated successfully as {clientID}.");
+                        names[clientID] = id;
                         await SendInitialPackets(conn.io, id);
                         return true;
                     case AuthenticationStatus.WrongPassword:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} used the wrong password. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        if (clients.TryRemove(id, out conn))
-                        {
-                            try { conn.io.Dispose(); } catch { }
-                            try { conn.socket.Dispose(); } catch { }
-                        }
-                        clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
+                        RemoveClient(id);
                         return false;
                     case AuthenticationStatus.WrongUsername:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} tried to login as non-existent user {clientID}. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        if (clients.TryRemove(id, out conn))
-                        {
-                            try { conn.io.Dispose(); } catch { }
-                            try { conn.socket.Dispose(); } catch { }
-                        }
-                        clients.TryRemove(new KeyValuePair<int, Conn>(id, clients[id]));
+                        RemoveClient(id);
+                        return false;
+                    case AuthenticationStatus.AlreadyLoggedIn:
+                        Notification?.Invoke(NotificationType.Warning, $"User {clientID} is already logged in. Rejecting client {id}.");
+                        reply.Headers["Type"] = "AuthFailure";
+                        reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.AlreadyLoggedIn.ToString());
+                        await PacketIO.SendPacketAsync(conn.io, reply);
+                        RemoveClient(id);
                         return false;
                     default:
                         break;
@@ -558,8 +547,19 @@ public class Server : IAsyncDisposable
     }
 
     // === Client Authentication ===
-    private async Task<AuthenticationStatus> AuthenticateClient(string username, string passwordHash)
+    private async Task<AuthenticationStatus> AuthenticateClient(string username, string passwordHash, int clientId)
     {
+        if (names.TryGetValue(username, out var existingId))
+        {
+            if (!clients.ContainsKey(existingId))
+            {
+                names.TryRemove(username, out _);
+            }
+            else if (existingId != clientId)
+            {
+                return AuthenticationStatus.AlreadyLoggedIn;
+            }
+        }
         if (!passwords.ContainsKey(username))
         {
             return AuthenticationStatus.WrongUsername;
@@ -589,6 +589,30 @@ public class Server : IAsyncDisposable
         }
     }
 
+    private void RemoveClient(int id)
+    {
+        if (clients.TryRemove(id, out var conn))
+        {
+            try { conn.io.Dispose(); } catch { }
+            try { conn.socket.Dispose(); } catch { }
+        }
+
+        positions.TryRemove(id, out _);
+
+        var username = names.FirstOrDefault(kvp => kvp.Value == id).Key;
+        if (!string.IsNullOrEmpty(username))
+        {
+            names.TryRemove(username, out _);
+        }
+
+        if (pendingVoiceClientId == id)
+        {
+            pendingVoiceClientId = null;
+            voiceInviteCts?.Cancel();
+            voiceInviteCts = null;
+        }
+    }
+
     private enum AuthenticationStatus
     {
         Success,
@@ -596,7 +620,8 @@ public class Server : IAsyncDisposable
         WrongPassword,
         WrongUsername,
         WrongCode,
-        UsernameTaken
+        UsernameTaken,
+        AlreadyLoggedIn
     }
 
 
