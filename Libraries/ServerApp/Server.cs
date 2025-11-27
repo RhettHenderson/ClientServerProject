@@ -50,11 +50,12 @@ public class Server : IAsyncDisposable
 
     // === Commands & Misc ===
     private static int nextID = 0;
-    private static readonly string[] commands = { "help", "whisper", "w" };
+    private static readonly string[] commands = { "help", "whisper", "w", "disconnect", "dc" };
     private static readonly byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands, CommonJsonContext.Default.StringArray);
     private IPAddress? listeningIp;
     private int listeningPort = 11111;
     private Socket? udp;
+    private readonly object udpLock = new();
     private int? pendingVoiceClientId;
     private CancellationTokenSource? voiceInviteCts;
 
@@ -155,16 +156,29 @@ public class Server : IAsyncDisposable
 
         while (true)
         {
-            var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
-            Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
-            var from = (IPEndPoint)result.RemoteEndPoint;
-            if (!packet.Headers.TryGetValue("Type", out var type) || type != "Audio")
+            try
             {
-                Notification?.Invoke(NotificationType.Info, $"Ignoring non-audio UDP packet from {from}");
-                continue;
-            }
+                var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
+                Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
+                var from = (IPEndPoint)result.RemoteEndPoint;
+                if (!packet.Headers.TryGetValue("Type", out var type) || type != "Audio")
+                {
+                    Notification?.Invoke(NotificationType.Info, $"Ignoring non-audio UDP packet from {from}");
+                    continue;
+                }
 
-            _player!.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                _player!.AddFrame(packet.Payload, 0, packet.Payload.Length);
+            }
+            catch (ObjectDisposedException)
+            {
+                Notification?.Invoke(NotificationType.Info, "UDP listener stopped.");
+                break;
+            }
+            catch (SocketException)
+            {
+                Notification?.Invoke(NotificationType.Info, "UDP listener stopped due to socket closure.");
+                break;
+            }
         }
     }
 
@@ -174,6 +188,25 @@ public class Server : IAsyncDisposable
         IPEndPoint remoteEndPoint = new IPEndPoint(ipAddr, port);
         var buf = Encoding.UTF8.GetBytes(message);
         await udp.SendToAsync(buf, SocketFlags.None, remoteEndPoint);
+    }
+
+    private void CloseUdpConnection()
+    {
+        Socket? socketToClose = null;
+        lock (udpLock)
+        {
+            if (udp != null)
+            {
+                socketToClose = udp;
+                udp = null;
+            }
+        }
+
+        if (socketToClose != null)
+        {
+            try { socketToClose.Close(); } catch { }
+            Notification?.Invoke(NotificationType.Info, "Closed local UDP connection.");
+        }
     }
     public async Task<int> WaitForConnectionAsync()
     {
@@ -509,6 +542,10 @@ public class Server : IAsyncDisposable
                 await PacketIO.HandleFileEndAsync(conn.io, incoming, files, Name);
                 Notification?.Invoke(NotificationType.Info, "Received FileEnd packet");
                 return true;
+            case "Disconnect":
+                Notification?.Invoke(NotificationType.Warning, $"Client {clientID} requested UDP disconnect.");
+                CloseUdpConnection();
+                return true;
             default:
                 Notification?.Invoke(NotificationType.Warning, $"Invalid packet header: {type}.");
                 break;
@@ -527,6 +564,19 @@ public class Server : IAsyncDisposable
             Notification?.Invoke(NotificationType.Info, $"Sending reply to client {currClient.Key}.");
             await PacketIO.SendPacketAsync(currClient.Value.io, packet);
         }
+    }
+
+    private async Task BroadcastDisconnectAsync(string reason)
+    {
+        var packet = new Packet
+        {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "Disconnect" } },
+            Payload = Encoding.UTF8.GetBytes(reason)
+        };
+
+        await BroadcastAsync(packet);
+        CloseUdpConnection();
     }
 
     private async Task SendInitialPackets(Stream stream, int id)
@@ -740,6 +790,10 @@ public class Server : IAsyncDisposable
                     {
                         Notification?.Invoke(NotificationType.Warning, "Client disconnected before invite could be accepted.");
                     }
+                    return;
+                case "disconnect":
+                case "dc":
+                    await BroadcastDisconnectAsync("Server requested UDP disconnect.");
                     return;
                 default:
                     Notification?.Invoke(NotificationType.Info, "Unknown command.");
