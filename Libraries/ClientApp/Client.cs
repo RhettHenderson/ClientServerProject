@@ -27,6 +27,7 @@ public class Client : IAsyncDisposable
     private IPAddress? serverIp;
     private int serverPort;
     private Socket? udp;
+    private readonly object udpLock = new();
 
     // === Public Properties ===
     public string? Name { get; private set; }
@@ -220,6 +221,11 @@ public class Client : IAsyncDisposable
                             await PacketIO.HandleFileEndAsync(stream, packet, files, Name);
                             //Event for file end
                             break;
+                        case ("Disconnect"):
+                            var message = text.Length > 0 ? text : "Remote requested UDP disconnect.";
+                            Notification?.Invoke(NotificationType.Warning, message);
+                            CloseUdpConnection();
+                            break;
                         default:
                             Error?.Invoke($"Unknown packet type received: {type}");
                             break;
@@ -250,12 +256,25 @@ public class Client : IAsyncDisposable
 
         while (true)
         {
-            var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
-            var n = result.ReceivedBytes;
-            var from = result.RemoteEndPoint.ToString();
-            from = from ?? "Unknown";
-            var message = Encoding.UTF8.GetString(buf, 0, n);
-            MessageReceived?.Invoke($"UDP Message from {from}: ", message);
+            try
+            {
+                var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
+                var n = result.ReceivedBytes;
+                var from = result.RemoteEndPoint.ToString();
+                from = from ?? "Unknown";
+                var message = Encoding.UTF8.GetString(buf, 0, n);
+                MessageReceived?.Invoke($"UDP Message from {from}: ", message);
+            }
+            catch (ObjectDisposedException)
+            {
+                MessageReceived?.Invoke("System", "UDP listener stopped.");
+                break;
+            }
+            catch (SocketException)
+            {
+                MessageReceived?.Invoke("System", "UDP listener stopped due to socket closure.");
+                break;
+            }
         }
     }
 
@@ -303,6 +322,42 @@ public class Client : IAsyncDisposable
 
         await StartListening(udp, serverIp, serverPort);
         await UdpSendAsync(udp, serverIp, serverPort, udpPacket);
+    }
+
+    public void CloseUdpConnection()
+    {
+        Socket? socketToClose = null;
+        lock (udpLock)
+        {
+            if (udp != null)
+            {
+                socketToClose = udp;
+                udp = null;
+            }
+        }
+
+        if (socketToClose != null)
+        {
+            try { socketToClose.Close(); } catch { }
+            Notification?.Invoke(NotificationType.Info, "Closed local UDP connection.");
+        }
+    }
+
+    public async Task SendDisconnectAsync(string reason)
+    {
+        CloseUdpConnection();
+
+        if (_stream is null)
+        {
+            return;
+        }
+
+        await PacketIO.SendPacketAsync(_stream, new Packet
+        {
+            ClientID = Name,
+            Headers = new Dictionary<string, string> { { "Type", "Disconnect" } },
+            Payload = Encoding.UTF8.GetBytes(reason)
+        });
     }
 
     // === Client-Exclusive Messaging Functions

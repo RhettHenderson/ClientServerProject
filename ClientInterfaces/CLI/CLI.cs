@@ -94,6 +94,10 @@ class CLI
             {
                 await client.SendVoiceInviteAsync();
             }
+            else if (line.StartsWith("--disconnect") || line.StartsWith("--dc"))
+            {
+                await client.SendDisconnectAsync("Client requested UDP disconnect.");
+            }
             else if (line.StartsWith("--"))
             {
                  await client.SendCommandAsync(line[2..]);
