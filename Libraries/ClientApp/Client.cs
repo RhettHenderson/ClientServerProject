@@ -29,9 +29,9 @@ public class Client : IAsyncDisposable
     private Socket? udp;
 
     // === Public Properties ===
-    public string Name { get; private set; }
-    public string authFile { get; private set; }
+    public string? Name { get; private set; }
     public Stream? _stream { get; set; }
+    public IPEndPoint? LocalEndPoint { get; private set; }
     // === Dictionaries / State ===
     public ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses { get; } = new();
 
@@ -53,9 +53,8 @@ public class Client : IAsyncDisposable
         serverIp = ip;
         serverPort = port;
         var socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-        authFile = "auth.txt";
         await socket.ConnectAsync(new IPEndPoint(ip, port));
-
+        LocalEndPoint = (IPEndPoint?)socket.LocalEndPoint;
         var net = new NetworkStream(socket, ownsSocket: true);
         Stream stream = net;
 

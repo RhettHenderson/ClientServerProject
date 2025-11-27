@@ -22,8 +22,8 @@ class Program
         };
 
         Console.WriteLine("Starting server...");
-        Console.Write("Enter IP address to listen on or press Enter for localhost: ");
-        string serverIP = Console.ReadLine();
+        string? serverIP = Console.ReadLine();
         await server.ExecuteServerAsync(port, serverIP);
+        Console.WriteLine("Server has started listening.");
     }
 }

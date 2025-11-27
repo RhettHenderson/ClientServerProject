@@ -559,6 +559,20 @@ public static class Utility
         // 5) Normalize (removes ., .., mixed separators) and return
         return Path.GetFullPath(path);
     }
+
+    public static string GetLocalIP()
+    {
+        foreach (var ni in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
+        {
+            //Find the first IPv4 that isn't loopback and return it
+            if (ni.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ni))
+            {
+                return ni.ToString();
+            }
+        }
+        //Fallback
+        return "127.0.0.1";
+    }
 }
 
 public sealed class MicRecorder : IDisposable

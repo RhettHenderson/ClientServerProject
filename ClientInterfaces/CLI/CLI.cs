@@ -31,40 +31,18 @@ class CLI
             Console.ResetColor();
         };
 
-        Console.Write("Enter server host or press Enter for localhost: ");
-        string host = Console.ReadLine();
+        Console.Write("Enter server host or press Enter for this device's IP: ");
+        string? host = Console.ReadLine();
         if (string.IsNullOrWhiteSpace(host))
         {
-            host = "127.0.0.1";
+            host = client.LocalEndPoint.Address.ToString();
         }
-        //Check for auth file to skip asking for username and password
         string username = "";
         string password = "";
-        if (File.Exists(client.authFile))
-        {
-            using (var fileReader = File.ReadLines(client.authFile).GetEnumerator())
-            {
-                while (fileReader.MoveNext())
-                {
-                    var line = fileReader.Current;
-                    var parts = line.Split(", ");
-                    if (parts.Length != 2)
-                    {
-                        Console.WriteLine($"Invalid line in auth file");
-                        continue;
-                    }
-                    username = parts[0];
-                    password = parts[1];
-                }
-            }
-        }
-        else
-        {
-            Console.Write("Username: ");
-            username = Console.ReadLine() ?? "Client";
-            Console.Write("Password: ");
-            password = ReadPassword();
-        }
+        Console.Write("Username: ");
+        username = Console.ReadLine() ?? "Client";
+        Console.Write("Password: ");
+        password = ReadPassword();
         var hash = Utility.SHA256Hash(password);
 
         Console.WriteLine($"Connection to server at {host}");
@@ -79,9 +57,9 @@ class CLI
 
             if (line.StartsWith("--file"))
             {
-                string localPath = null;
-                string remoteFilename = null;
-                string saveLocation = null;
+                string? localPath = null;
+                string? remoteFilename = null;
+                string? saveLocation = null;
                 args = line[7..].Split(" ");
                 if (args.Length < 1 || args.Length > 5)
                 {

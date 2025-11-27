@@ -73,8 +73,9 @@ public class Server : IAsyncDisposable
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     // === Main Server Loop ===
-    public async Task ExecuteServerAsync(int port, string ip)
+    public async Task ExecuteServerAsync(int port)
     {
+        string ip = Utility.GetLocalIP();
         Console.Title = "Server";
         await InitListener(ip);
 
