@@ -418,9 +418,6 @@ public class Client : IAsyncDisposable
                         },
                         Payload = slice
                     };
-
-                    // fire-and-forget is fine for UDP; you can queue or await if desired
-                    Notification?.Invoke(NotificationType.Info, $"Sending audio packet Seq={seq}, Ts={timestampSamples}, Size={take}");
                     PacketIO.SendPacketToAsyncUdp(udp, audio, remote);
 
                     // advance counters
