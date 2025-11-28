@@ -1,4 +1,4 @@
-﻿using Common;
+using Common;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Security;
@@ -7,13 +7,9 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
-using System;
-using NAudio.Wave;
-using System.Xml.Linq;
 
 namespace Client_Server;
-public class Client : IAsyncDisposable
-{
+public class Client : IAsyncDisposable {
     // === Static Fields ===
     private static readonly string defaultSaveDir = @"C:\Users\rhett\Documents\downloads";
     private static readonly ConcurrentDictionary<string, FileReceiveState> files = new(); // Current downloads in progress
@@ -48,8 +44,7 @@ public class Client : IAsyncDisposable
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     // === Main Client Logic ===
-    public async Task ConnectAsync(string host, int port, string name, string? passwordHash, bool createUser = false, Func<Task<string?>>? requestAuthCode = null, string authCode = "")
-    {
+    public async Task ConnectAsync(string host, int port, string name, string? passwordHash, bool createUser = false, Func<Task<string?>>? requestAuthCode = null, string authCode = "") {
         var ip = IPAddress.TryParse(host, out var ipAddr) ? ipAddr : IPAddress.Loopback;
         serverIp = ip;
         serverPort = port;
@@ -59,14 +54,12 @@ public class Client : IAsyncDisposable
         var net = new NetworkStream(socket, ownsSocket: true);
         Stream stream = net;
 
-        try
-        {
+        try {
             var ssl = new SslStream(net, leaveInnerStreamOpen: false,
                 userCertificateValidationCallback: (_, __, ___, ____) => true // DEV ONLY
             );
 
-            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
-            {
+            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions {
                 TargetHost = "localhost",
                 EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                 CertificateRevocationCheckMode = X509RevocationMode.NoCheck
@@ -74,8 +67,7 @@ public class Client : IAsyncDisposable
 
             stream = ssl;
         }
-        catch (AuthenticationException)
-        {
+        catch (AuthenticationException) {
             Notification?.Invoke(NotificationType.Warning, "SSL negotiation failed. Falling back to unencrypted connection.");
 
             try { stream.Dispose(); } catch { }
@@ -86,8 +78,7 @@ public class Client : IAsyncDisposable
             net = new NetworkStream(socket, ownsSocket: true);
             stream = net;
         }
-        catch (IOException)
-        {
+        catch (IOException) {
             Notification?.Invoke(NotificationType.Warning, "SSL negotiation failed due to IO error. Falling back to unencrypted connection.");
 
             try { stream.Dispose(); } catch { }
@@ -105,10 +96,8 @@ public class Client : IAsyncDisposable
 
         _ = Task.Run(() => ReceiveLoopAsync(stream));
 
-        if (createUser)
-        {
-            Packet authCodeRequest = new Packet
-            {
+        if (createUser) {
+            Packet authCodeRequest = new Packet {
                 ClientID = name,
                 Headers = new Dictionary<string, string> { { "Type", "AuthCodeRequest" } },
                 Payload = Array.Empty<byte>()
@@ -118,10 +107,8 @@ public class Client : IAsyncDisposable
             //Add an if statement here and a way to show an error in the UI later
             await CreateNewUser(name, stream, passwordHash, authCode);
         }
-        else
-        {
-            Packet authPacket = new Packet
-            {
+        else {
+            Packet authPacket = new Packet {
                 ClientID = name,
                 Headers = new Dictionary<string, string>
                 {
@@ -132,30 +119,23 @@ public class Client : IAsyncDisposable
             await PacketIO.SendPacketAsync(stream, authPacket);
         }
     }
-    public async Task ReceiveLoopAsync(Stream stream)
-    {
-        try
-        {
-            while (true)
-            {
+    public async Task ReceiveLoopAsync(Stream stream) {
+        try {
+            while (true) {
                 var (status, packet) = await PacketIO.ReceivePacketAsync(stream);
-                if (status == PacketStatus.Ok && packet != null)
-                {
+                if (status == PacketStatus.Ok && packet != null) {
                     var headers = packet.Headers;
                     var text = Encoding.UTF8.GetString(packet.Payload);
                     var type = headers["Type"];
 
-                    if (pendingResponses.TryRemove(type, out var tcs))
-                    {
+                    if (pendingResponses.TryRemove(type, out var tcs)) {
                         tcs.TrySetResult(packet);
                         continue;
                     }
 
-                    switch (type)
-                    {
+                    switch (type) {
                         case ("Message"):
-                            if (text != "")
-                            {
+                            if (text != "") {
                                 MessageReceived?.Invoke(packet.ClientID, text);
                             }
                             break;
@@ -172,17 +152,14 @@ public class Client : IAsyncDisposable
                         //Data type tells the client to update some value
                         case ("Data"):
                             var variable = headers["Var"];
-                            if (variable == "id")
-                            {
+                            if (variable == "id") {
                                 id = int.Parse(text);
                                 //Client is the default name if the user didn't input a name or there was an error
-                                if (Name == "Client")
-                                {
+                                if (Name == "Client") {
                                     Name = $"Client {id}";
                                     IdAssigned?.Invoke(id);
                                 }
-                                Packet ack = new Packet
-                                {
+                                Packet ack = new Packet {
                                     ClientID = Name,
                                     Headers = new Dictionary<string, string>
                                 {
@@ -196,8 +173,7 @@ public class Client : IAsyncDisposable
                             }
 
 
-                            else if (variable == "commands")
-                            {
+                            else if (variable == "commands") {
                                 commands = JsonSerializer.Deserialize(packet.Payload, Common.CommonJsonContext.Default.StringArray) ?? Array.Empty<string>();
                                 CommandsReceived?.Invoke(commands);
                                 break;
@@ -205,7 +181,7 @@ public class Client : IAsyncDisposable
                             break;
 
                         case ("AuthFailure"):
-                            Error?.Invoke($"Authentication Error: {text}.");
+                            Error?.Invoke(text);
                             Disconnected?.Invoke();
                             stream.Dispose();
                             return;
@@ -231,33 +207,27 @@ public class Client : IAsyncDisposable
                             break;
                     }
                 }
-                else
-                {
+                else {
                     break;
                 }
             }
         }
-        catch (Exception ex)
-        {
+        catch (Exception ex) {
             Error?.Invoke($"Connection error: {ex.Message}");
         }
-        finally
-        {
+        finally {
             Disconnected?.Invoke();
             try { stream.Dispose(); } catch { }
         }
     }
 
-    public async Task UdpReceiveLoopAsync(Socket udp)
-    {
+    public async Task UdpReceiveLoopAsync(Socket udp) {
         MessageReceived?.Invoke("System", "UDP listener started.");
         var buf = new byte[4096];
         EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
 
-        while (true)
-        {
-            try
-            {
+        while (true) {
+            try {
                 var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
                 var n = result.ReceivedBytes;
                 var from = result.RemoteEndPoint.ToString();
@@ -265,42 +235,35 @@ public class Client : IAsyncDisposable
                 var message = Encoding.UTF8.GetString(buf, 0, n);
                 MessageReceived?.Invoke($"UDP Message from {from}: ", message);
             }
-            catch (ObjectDisposedException)
-            {
+            catch (ObjectDisposedException) {
                 MessageReceived?.Invoke("System", "UDP listener stopped.");
                 break;
             }
-            catch (SocketException)
-            {
+            catch (SocketException) {
                 MessageReceived?.Invoke("System", "UDP listener stopped due to socket closure.");
                 break;
             }
         }
     }
 
-    public async Task UdpSendAsync(Socket udp, IPAddress ip, int port, Packet packet)
-    {
+    public async Task UdpSendAsync(Socket udp, IPAddress ip, int port, Packet packet) {
         MessageReceived?.Invoke("System", "Sending UDP packet.");
         IPEndPoint remoteEndPoint = new IPEndPoint(ip, port);
         await PacketIO.SendPacketToAsyncUdp(udp, packet, remoteEndPoint);
     }
 
-    public async Task SendVoiceInviteAsync()
-    {
+    public async Task SendVoiceInviteAsync() {
         if (_stream is null) throw new InvalidOperationException("Not connected.");
 
-        await PacketIO.SendPacketAsync(_stream, new Packet
-        {
+        await PacketIO.SendPacketAsync(_stream, new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string> { { "Type", "VoiceInvite" } },
             Payload = Array.Empty<byte>()
         });
     }
 
-    private async Task StartUdpConnectionAsync()
-    {
-        if (udp != null || serverIp is null)
-        {
+    private async Task StartUdpConnectionAsync() {
+        if (udp != null || serverIp is null) {
             return;
         }
 
@@ -309,8 +272,7 @@ public class Client : IAsyncDisposable
 
         _ = Task.Run(() => UdpReceiveLoopAsync(udp));
 
-        Packet udpPacket = new Packet
-        {
+        Packet udpPacket = new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string>
             {
@@ -324,36 +286,29 @@ public class Client : IAsyncDisposable
         await UdpSendAsync(udp, serverIp, serverPort, udpPacket);
     }
 
-    public void CloseUdpConnection()
-    {
+    public void CloseUdpConnection() {
         Socket? socketToClose = null;
-        lock (udpLock)
-        {
-            if (udp != null)
-            {
+        lock (udpLock) {
+            if (udp != null) {
                 socketToClose = udp;
                 udp = null;
             }
         }
 
-        if (socketToClose != null)
-        {
+        if (socketToClose != null) {
             try { socketToClose.Close(); } catch { }
             Notification?.Invoke(NotificationType.Info, "Closed local UDP connection.");
         }
     }
 
-    public async Task SendDisconnectAsync(string reason)
-    {
+    public async Task SendDisconnectAsync(string reason) {
         CloseUdpConnection();
 
-        if (_stream is null)
-        {
+        if (_stream is null) {
             return;
         }
 
-        await PacketIO.SendPacketAsync(_stream, new Packet
-        {
+        await PacketIO.SendPacketAsync(_stream, new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string> { { "Type", "Disconnect" } },
             Payload = Encoding.UTF8.GetBytes(reason)
@@ -361,23 +316,19 @@ public class Client : IAsyncDisposable
     }
 
     // === Client-Exclusive Messaging Functions
-    public async Task SendMessageAsync(string text)
-    {
+    public async Task SendMessageAsync(string text) {
         if (_stream is null) throw new InvalidOperationException("Not connected.");
 
-        await PacketIO.SendPacketAsync(_stream, new Packet
-        {
+        await PacketIO.SendPacketAsync(_stream, new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string> { { "Type", "Message" } },
             Payload = Encoding.UTF8.GetBytes(text)
         });
     }
 
-    public async Task SendCommandAsync(string command)
-    {
+    public async Task SendCommandAsync(string command) {
         if (_stream is null) throw new InvalidOperationException("Not connected.");
-        await PacketIO.SendPacketAsync(_stream, new Packet
-        {
+        await PacketIO.SendPacketAsync(_stream, new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string> { { "Type", "Command" } },
             Payload = Encoding.UTF8.GetBytes(command)
@@ -385,10 +336,8 @@ public class Client : IAsyncDisposable
     }
 
     // === User Creation ===
-    public async Task<bool> CreateNewUser(string username, Stream stream, string passwordHash, string userAuthCode)
-    { 
-        Packet authCode = new Packet
-        {
+    public async Task<bool> CreateNewUser(string username, Stream stream, string passwordHash, string userAuthCode) {
+        Packet authCode = new Packet {
             ClientID = username,
             Headers = new Dictionary<string, string> { { "Type", "AuthCode" } },
             Payload = Encoding.UTF8.GetBytes(userAuthCode)
@@ -396,10 +345,8 @@ public class Client : IAsyncDisposable
 
         Packet response = await PacketIO.SendAndWaitAsync(stream, authCode, "AuthStatus", pendingResponses);
         var payload = Encoding.UTF8.GetString(response.Payload);
-        if (payload == "Success")
-        {
-            Packet makeNewUser = new Packet
-            {
+        if (payload == "Success") {
+            Packet makeNewUser = new Packet {
                 ClientID = username,
                 Headers = new Dictionary<string, string> { { "Type", "CreateNewUser" }, { "Name", username }, { "PasswordHash", passwordHash } },
                 Payload = Array.Empty<byte>()
@@ -407,8 +354,7 @@ public class Client : IAsyncDisposable
             response = await PacketIO.SendAndWaitAsync(stream, makeNewUser, "AuthStatus", pendingResponses);
             payload = Encoding.UTF8.GetString(response.Payload);
 
-            switch (payload)
-            {
+            switch (payload) {
                 case "Success":
                     return true;
                 case "UsernameTaken":
@@ -419,15 +365,13 @@ public class Client : IAsyncDisposable
             }
 
         }
-        else
-        {
+        else {
             return false;
         }
     }
 
     // === Microphone Capturing ===
-    public async Task StartListening(Socket udp, IPAddress ip, int port)
-    {
+    public async Task StartListening(Socket udp, IPAddress ip, int port) {
         Notification?.Invoke(NotificationType.Info, "Starting microphone capture...");
         var rec = new MicRecorder(frameMs: 10);
         rec.Start();
@@ -440,27 +384,22 @@ public class Client : IAsyncDisposable
         const int samplesPer10ms = 480;
         const int maxFrameBytes = samplesPer10ms * bytesPerSample;
 
-        var senderThread = new Thread(() =>
-        {
-            while (true)
-            {
-                if (!rec.TryDequeue(out var frame) || frame is null)
-                {
+        var senderThread = new Thread(() => {
+            while (true) {
+                if (!rec.TryDequeue(out var frame) || frame is null) {
                     Thread.Sleep(1);
                     continue;
                 }
 
                 // 2) Split any frame larger than 960 bytes into 10 ms slices
                 int offset = 0;
-                while (offset < frame.Length)
-                {
+                while (offset < frame.Length) {
                     int take = Math.Min(maxFrameBytes, frame.Length - offset);
                     var slice = new byte[take];
                     Buffer.BlockCopy(frame, offset, slice, 0, take);
 
                     // 3) Add minimal sequencing metadata (headers) for VoIP
-                    var audio = new Packet
-                    {
+                    var audio = new Packet {
                         ClientID = Name, // your ID string
                         Headers = new Dictionary<string, string>
                         {
@@ -481,14 +420,12 @@ public class Client : IAsyncDisposable
                     offset += take;
                 }
             }
-        })
-        { IsBackground = true, Name = "VoIP MicSender" }; 
+        }) { IsBackground = true, Name = "VoIP MicSender" };
         senderThread.Start();
     }
 
     // === IDisposable Implementation ===
-    public async ValueTask DisposeAsync()
-    {
+    public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
     }
 }

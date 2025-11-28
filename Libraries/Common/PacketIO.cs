@@ -1,4 +1,4 @@
-﻿using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using System.Buffers.Binary;
@@ -11,18 +11,15 @@ using System.Text.Json;
 
 namespace Common;
 
-public class Packet
-{
+public class Packet {
     public string ClientID { get; set; }
     public Dictionary<string, string> Headers { get; set; } = new();
     public byte[] Payload { get; set; } = Array.Empty<byte>();
 }
 
-public static class PositionCodec
-{
+public static class PositionCodec {
     //Payload is 12 bytes: x, y, z
-    public static byte[] Encode(float x, float y, float z)
-    {
+    public static byte[] Encode(float x, float y, float z) {
         byte[] buf = new byte[12];
         BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(0, 4), x);
         BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(4, 4), y);
@@ -30,8 +27,7 @@ public static class PositionCodec
         return buf;
     }
 
-    public static (float x, float y, float z) Decode(ReadOnlySpan<byte> buf)
-    {
+    public static (float x, float y, float z) Decode(ReadOnlySpan<byte> buf) {
         float x = BinaryPrimitives.ReadSingleLittleEndian(buf.Slice(0, 4));
         float y = BinaryPrimitives.ReadSingleLittleEndian(buf.Slice(4, 4));
         float z = BinaryPrimitives.ReadSingleLittleEndian(buf.Slice(8, 4));
@@ -39,10 +35,8 @@ public static class PositionCodec
     }
 }
 
-public static class PacketIO
-{
-    static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web)
-    {
+public static class PacketIO {
+    static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web) {
         WriteIndented = false,
         TypeInfoResolver = null
     };
@@ -52,8 +46,7 @@ public static class PacketIO
     private static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<string[]> StringArrayInfo = CommonJsonContext.Default.StringArray;
 
     public static byte[] Serialize(Packet packet) => JsonSerializer.SerializeToUtf8Bytes(packet, PacketInfo);
-    public static byte[] SerializeForUdp(Packet packet)
-    {
+    public static byte[] SerializeForUdp(Packet packet) {
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
 
@@ -64,8 +57,7 @@ public static class PacketIO
 
         bw.Write((ushort)packet.Headers.Count);
 
-        foreach (var kv in packet.Headers)
-        {
+        foreach (var kv in packet.Headers) {
             bw.Write((ushort)kv.Key.Length);
             bw.Write(Encoding.UTF8.GetBytes(kv.Key));
             bw.Write((ushort)kv.Value.Length);
@@ -79,14 +71,12 @@ public static class PacketIO
         return ms.ToArray();
     }
     public static Packet Deserialize(ReadOnlySpan<byte> data) => JsonSerializer.Deserialize<Packet>(data, PacketInfo)!;
-    public static Packet DeserializeForUdp(ReadOnlySpan<byte> data)
-    {
+    public static Packet DeserializeForUdp(ReadOnlySpan<byte> data) {
         var packet = new Packet();
         var br = new BinaryReader(new MemoryStream(data.ToArray()));
 
         byte marker = br.ReadByte();
-        if (marker != 0x55)
-        {
+        if (marker != 0x55) {
             throw new InvalidDataException("Packet missing magic byte header. This packet is either corrupted or came from somewhere that is not the client.");
         }
 
@@ -94,8 +84,7 @@ public static class PacketIO
         packet.ClientID = Encoding.UTF8.GetString(br.ReadBytes(idLen));
 
         ushort headerCount = br.ReadUInt16();
-        for (int i = 0; i < headerCount; i++)
-        {
+        for (int i = 0; i < headerCount; i++) {
             ushort keyLen = br.ReadUInt16();
             string key = Encoding.UTF8.GetString(br.ReadBytes(keyLen));
 
@@ -111,8 +100,7 @@ public static class PacketIO
         return packet;
 
     }
-    public static void SendPacket(Socket socket, Packet packet)
-    {
+    public static void SendPacket(Socket socket, Packet packet) {
         var body = Serialize(packet);
         Span<byte> len = stackalloc byte[4];
         BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
@@ -120,52 +108,44 @@ public static class PacketIO
         socket.Send(len);
 
         int sent = 0;
-        while (sent < body.Length)
-        {
+        while (sent < body.Length) {
             sent += socket.Send(body, sent, body.Length - sent, SocketFlags.None);
         }
     }
 
-    public static async Task SendPacketToAsyncUdp(Socket socket, Packet packet, EndPoint destination)
-    {
+    public static async Task SendPacketToAsyncUdp(Socket socket, Packet packet, EndPoint destination) {
         byte[] dgram = SerializeForUdp(packet);
         await socket.SendToAsync(dgram, SocketFlags.None, destination);
     }
 
-    public static async Task SendPacketAsyncUdp(Socket socket, Packet packet)
-    {
-        if (!socket.Connected)
-        {
+    public static async Task SendPacketAsyncUdp(Socket socket, Packet packet) {
+        if (!socket.Connected) {
             throw new InvalidOperationException("Socket must be connected to an endpoint to use SendPacketAsyncUdp. " +
                 "Call socket.Connect(endpoint) first or use SendPacketToAsyncUdp() instead");
         }
         byte[] dgram = SerializeForUdp(packet);
         await socket.SendAsync(dgram, SocketFlags.None);
     }
-    public static async Task SendPacketAsync(Socket socket, Packet packet)
-    {
+    public static async Task SendPacketAsync(Socket socket, Packet packet) {
         byte[] body = Serialize(packet);
         byte[] len = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
 
         int sent = 0;
-        while (sent < len.Length)
-        {
+        while (sent < len.Length) {
             int n = await socket.SendAsync(new ReadOnlyMemory<byte>(len, sent, len.Length - sent), SocketFlags.None);
             if (n == 0) throw new IOException("Socket closed");
             sent += n;
         }
         sent = 0;
-        while (sent < body.Length)
-        {
+        while (sent < body.Length) {
             int n = await socket.SendAsync(new ReadOnlyMemory<byte>(body, sent, body.Length - sent), SocketFlags.None);
             if (n == 0) throw new IOException("Socket closed");
             sent += n;
         }
     }
 
-    public static async Task SendPacketAsync(Stream stream, Packet packet)
-    {
+    public static async Task SendPacketAsync(Stream stream, Packet packet) {
         byte[] body = Serialize(packet);
         byte[] len = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
@@ -173,43 +153,35 @@ public static class PacketIO
         await stream.WriteAsync(len);
         await stream.WriteAsync(body);
     }
-    public static async Task<(PacketStatus status, Packet packet)> ReceivePacketAsync(Stream stream)
-    {
+    public static async Task<(PacketStatus status, Packet packet)> ReceivePacketAsync(Stream stream) {
         byte[] lenBuf = new byte[4];
         var received = await ReceiveExactlyAsync(stream, lenBuf);
-        if (received == PacketStatus.Disconnected)
-        {
+        if (received == PacketStatus.Disconnected) {
             return (PacketStatus.Disconnected, null);
         }
         int len = BinaryPrimitives.ReadInt32BigEndian(lenBuf);
-        if (len < 0 || len > 16000000)
-        {
+        if (len < 0 || len > 16000000) {
             return (PacketStatus.Error, null);
         }
 
         //read body
         byte[] body = new byte[len];
         received = await ReceiveExactlyAsync(stream, body);
-        if (received == PacketStatus.Disconnected)
-        {
+        if (received == PacketStatus.Disconnected) {
             return (PacketStatus.Disconnected, null);
         }
         var packet = Deserialize(body);
         return (PacketStatus.Ok, packet);
     }
 
-    public static async Task<PacketStatus> ReceiveExactlyAsync(Stream stream, Memory<byte> buffer)
-    {
+    public static async Task<PacketStatus> ReceiveExactlyAsync(Stream stream, Memory<byte> buffer) {
         int received = 0;
         int r;
-        while (received < buffer.Length)
-        {
-            try
-            {
+        while (received < buffer.Length) {
+            try {
                 r = await stream.ReadAsync(buffer.Slice(received));
             }
-            catch
-            {
+            catch {
                 return PacketStatus.Disconnected;
             }
             if (r == 0) return PacketStatus.Disconnected;
@@ -218,32 +190,28 @@ public static class PacketIO
         return 0;
     }
 
-    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType, ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses)
-    {
+    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType, ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses) {
         var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
         pendingResponses[expectedType] = tcs;
 
         await SendPacketAsync(stream, packet);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        using (cts.Token.Register(() => tcs.TrySetCanceled()))
-        {
+        using (cts.Token.Register(() => tcs.TrySetCanceled())) {
             return await tcs.Task;
         }
     }
 
     public static async Task<bool> SendFileAsync(
-        Stream stream, 
+        Stream stream,
         string localPath,
         ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses,
-        string? remoteFilename = null, 
-        string? saveLocation = null, 
-        int chunkSize = 64 * 1024, 
-        Action<NotificationType, string>? Notification = null, 
-        Action<string>? Error = null)
-    {
-        if (!System.IO.File.Exists(localPath))
-        {
+        string? remoteFilename = null,
+        string? saveLocation = null,
+        int chunkSize = 64 * 1024,
+        Action<NotificationType, string>? Notification = null,
+        Action<string>? Error = null) {
+        if (!System.IO.File.Exists(localPath)) {
             return false;
         }
 
@@ -259,8 +227,7 @@ public static class PacketIO
         //File chunk packet (1 or more)
         //File end packet
 
-        var start = new Packet
-        {
+        var start = new Packet {
             ClientID = "Server",
             Headers = new Dictionary<string, string> {
                     { "Type", "FileStart" },
@@ -275,12 +242,10 @@ public static class PacketIO
         Notification?.Invoke(NotificationType.Info, $"Starting file transfer: {remoteFilename} ({length} bytes)");
         Console.WriteLine("Starting file transfer");
         var startAck = await PacketIO.SendAndWaitAsync(stream, start, "FileStartAck", pendingResponses);
-        if (startAck == null)
-        {
+        if (startAck == null) {
             return false;
         }
-        if (startAck.Headers["Status"] == "Exists")
-        {
+        if (startAck.Headers["Status"] == "Exists") {
             return false;
         }
 
@@ -290,17 +255,14 @@ public static class PacketIO
         int index = 0;
         int totalChunks = (int)(length + chunkSize - 1) / chunkSize;
 
-        await using (var fs = System.IO.File.OpenRead(localPath))
-        {
+        await using (var fs = System.IO.File.OpenRead(localPath)) {
             byte[] buffer = new byte[chunkSize];
             int read;
             Notification?.Invoke(NotificationType.Info, "Beginning file chunk transfers...");
             Console.WriteLine("Beginning file chunk transfers");
-            while ((read = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0)
-            {
+            while ((read = await fs.ReadAsync(buffer, 0, buffer.Length)) > 0) {
                 var payload = (read == buffer.Length) ? buffer : buffer.AsSpan(0, read).ToArray();
-                var chunk = new Packet
-                {
+                var chunk = new Packet {
                     ClientID = "Server",
                     Headers = new Dictionary<string, string>
                     {
@@ -319,8 +281,7 @@ public static class PacketIO
         }
 
         //Send file end
-        var end = new Packet
-        {
+        var end = new Packet {
             ClientID = "Server",
             Headers = new Dictionary<string, string>
             {
@@ -334,18 +295,15 @@ public static class PacketIO
         Notification?.Invoke(NotificationType.Info, "Sending file end packet...");
         Console.WriteLine("Sending file end packet");
         var endAck = await PacketIO.SendAndWaitAsync(stream, end, "FileEndAck", pendingResponses);
-        if (endAck != null)
-        {
-            if (endAck.Headers["Status"] == "Error")
-            {
+        if (endAck != null) {
+            if (endAck.Headers["Status"] == "Error") {
                 Error?.Invoke("File end ack error. File transfer failed.");
                 return false;
             }
             Notification?.Invoke(NotificationType.Info, "File transfer complete.");
             return true;
         }
-        else
-        {
+        else {
             Error?.Invoke("File end ack never received. File transfer failed.");
             return false;
         }
@@ -353,8 +311,7 @@ public static class PacketIO
 
     }
 
-    public static async Task HandleFileStartAsync(Stream stream, Packet packet, ConcurrentDictionary<string, FileReceiveState> files, string Name, string defaultSaveDir)
-    {
+    public static async Task HandleFileStartAsync(Stream stream, Packet packet, ConcurrentDictionary<string, FileReceiveState> files, string Name, string defaultSaveDir) {
         var headers = packet.Headers;
         var name = headers["Name"];
         var length = long.Parse(headers["Length"]);
@@ -365,21 +322,18 @@ public static class PacketIO
         Directory.CreateDirectory(saveDir);
         var fullPath = Path.Combine(saveDir, name);
 
-        var reply = new Packet
-        {
+        var reply = new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string> { { "Type", "FileStartAck" }, { "Status", "Ok" }, { "FileKey", fullPath } },
             Payload = Array.Empty<byte>()
         };
-        if (File.Exists(fullPath) || files.ContainsKey(fullPath))
-        {
+        if (File.Exists(fullPath) || files.ContainsKey(fullPath)) {
             Console.WriteLine("File exists.");
             reply.Headers["Status"] = "Exists";
             await PacketIO.SendPacketAsync(stream, reply);
             return;
         }
-        var state = new FileReceiveState
-        {
+        var state = new FileReceiveState {
             Name = fullPath,
             ExpectedLength = length,
             ExpectedChunks = (int)((length + chunkSize - 1) / chunkSize),
@@ -392,8 +346,7 @@ public static class PacketIO
         await PacketIO.SendPacketAsync(stream, reply);
     }
 
-    public static async Task HandleFileChunkAsync(Packet packet, ConcurrentDictionary<string, FileReceiveState> files)
-    {
+    public static async Task HandleFileChunkAsync(Packet packet, ConcurrentDictionary<string, FileReceiveState> files) {
         var headers = packet.Headers;
         var name = headers["Name"];
         var index = int.Parse(headers["Index"]);
@@ -401,14 +354,12 @@ public static class PacketIO
 
         headers.TryGetValue("FileKey", out var key);
 
-        if (string.IsNullOrEmpty(key))
-        {
+        if (string.IsNullOrEmpty(key)) {
             return;
         }
 
         //Ignore if name doesn't match the value we have in our dictionary
-        if (!files.TryGetValue(key, out var state) || state.Stream == null)
-        {
+        if (!files.TryGetValue(key, out var state) || state.Stream == null) {
             return;
         }
 
@@ -417,60 +368,47 @@ public static class PacketIO
         state.Received += payload.Length;
     }
 
-    public static async Task HandleFileEndAsync(Stream stream, Packet packet, ConcurrentDictionary<string, FileReceiveState> files, string Name)
-    {
+    public static async Task HandleFileEndAsync(Stream stream, Packet packet, ConcurrentDictionary<string, FileReceiveState> files, string Name) {
         Console.WriteLine("Beginning file end processing.");
         var headers = packet.Headers;
         var name = headers["Name"];
         var totalChunks = int.Parse(headers["TotalChunks"]);
 
         headers.TryGetValue("FileKey", out var key);
-        if (string.IsNullOrEmpty(key))
-        {
+        if (string.IsNullOrEmpty(key)) {
             return;
         }
 
-        var reply = new Packet
-
-
-        {
+        var reply = new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string> { { "Type", "FileEndAck" } },
             Payload = Array.Empty<byte>()
         };
 
-        if (!files.TryGetValue(key, out var state) || state.Stream == null)
-        {
+        if (!files.TryGetValue(key, out var state) || state.Stream == null) {
             reply.Headers["Status"] = "Error";
         }
-        else
-        {
-            try
-            {
+        else {
+            try {
                 await state.Stream.FlushAsync();
                 state.Stream.Close();
                 state.Stream.Dispose();
 
 
-                if (state.Received != state.ExpectedLength)
-                {
+                if (state.Received != state.ExpectedLength) {
                     reply.Headers["Status"] = "LengthMismatch";
                 }
-                else if (totalChunks != state.ExpectedChunks)
-                {
+                else if (totalChunks != state.ExpectedChunks) {
                     reply.Headers["Status"] = "LengthMismatch";
                 }
-                else
-                {
+                else {
                     reply.Headers["Status"] = "Success";
                 }
             }
-            catch
-            {
+            catch {
                 reply.Headers["Status"] = "Error";
             }
-            finally
-            {
+            finally {
                 files.TryRemove(key, out _);
 
             }
@@ -480,8 +418,7 @@ public static class PacketIO
     }
 }
 
-public class FileReceiveState
-{
+public class FileReceiveState {
     public string Name = "";
     public long ExpectedLength;
     public long Received;
@@ -489,8 +426,7 @@ public class FileReceiveState
     public FileStream? Stream;
 }
 
-public enum PacketStatus
-{
+public enum PacketStatus {
     Ok,
     Disconnected,
     Error
@@ -498,29 +434,24 @@ public enum PacketStatus
 
 public enum NotificationType { Info, Warning, Error }
 
-public static class Utility
-{
-    public static string SHA256Hash(string input)
-    {
+public static class Utility {
+    public static string SHA256Hash(string input) {
         SHA256 hasher = SHA256.Create();
         byte[] hashValue = hasher.ComputeHash(Encoding.UTF8.GetBytes(input));
         StringBuilder sb = new StringBuilder();
-        foreach (byte b in hashValue)
-        {
+        foreach (byte b in hashValue) {
             sb.Append(b.ToString("x2"));
         }
         return sb.ToString();
     }
-    public static int GenerateAuthCode(ref int outCode, int digits = 6)
-    {
+    public static int GenerateAuthCode(ref int outCode, int digits = 6) {
         //min is 10^(digits-1), max is 10^digits
         //since rand.Next is exclusive on the upper bound, we let max go up to 10^digits without subtracting the 1
         int min = (int)Math.Pow(10, digits - 1);
         int max = (int)Math.Pow(10, digits);
         byte[] bytes = new byte[4];
         int value;
-        do
-        {
+        do {
             RandomNumberGenerator.Fill(bytes);
             value = BitConverter.ToInt32(bytes, 0) & int.MaxValue; // makes it non-negative
             value = (value % (max - min + 1)) + min; // scale to desired range
@@ -530,12 +461,10 @@ public static class Utility
         outCode = value;
         return value;
     }
-    public static string ResolveSaveDir(string input, string defaultSaveDir)
-    {
+    public static string ResolveSaveDir(string input, string defaultSaveDir) {
         // 1) Treat null/blank or "=default" (case-insensitive) as the default
         if (string.IsNullOrWhiteSpace(input) ||
-            string.Equals(input.Trim(), "=default", StringComparison.OrdinalIgnoreCase))
-        {
+            string.Equals(input.Trim(), "=default", StringComparison.OrdinalIgnoreCase)) {
             return Path.GetFullPath(defaultSaveDir);
         }
 
@@ -543,16 +472,14 @@ public static class Utility
         var path = Environment.ExpandEnvironmentVariables(input.Trim());
 
         // 3) Expand "~" to the user home (useful on Unix/macOS; harmless on Windows if present)
-        if (path.StartsWith("~"))
-        {
+        if (path.StartsWith("~")) {
             var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             var tail = path.TrimStart('~').TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             path = string.IsNullOrEmpty(tail) ? home : Path.Combine(home, tail);
         }
 
         // 4) If not fully qualified, make it relative to defaultSaveDir
-        if (!Path.IsPathFullyQualified(path))
-        {
+        if (!Path.IsPathFullyQualified(path)) {
             path = Path.Combine(defaultSaveDir, path);
         }
 
@@ -560,13 +487,10 @@ public static class Utility
         return Path.GetFullPath(path);
     }
 
-    public static string GetLocalIP()
-    {
-        foreach (var ni in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
-        {
+    public static string GetLocalIP() {
+        foreach (var ni in Dns.GetHostEntry(Dns.GetHostName()).AddressList) {
             //Find the first IPv4 that isn't loopback and return it
-            if (ni.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ni))
-            {
+            if (ni.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ni)) {
                 return ni.ToString();
             }
         }
@@ -575,8 +499,7 @@ public static class Utility
     }
 }
 
-public sealed class MicRecorder : IDisposable
-{
+public sealed class MicRecorder : IDisposable {
     private readonly int frameMs;
     private readonly int targetSampleRate = 48000;  // network format
     private readonly int targetChannels = 1;      // mono
@@ -592,8 +515,7 @@ public sealed class MicRecorder : IDisposable
     private volatile bool started;
     private volatile bool disposing;
 
-    public MicRecorder(int frameMs = 20, DataFlow endpoint = DataFlow.Capture, Role role = Role.Communications)
-    {
+    public MicRecorder(int frameMs = 20, DataFlow endpoint = DataFlow.Capture, Role role = Role.Communications) {
         if (frameMs != 10 && frameMs != 20) throw new ArgumentException("Use 10 or 20 ms frames for VoIP.");
         this.frameMs = frameMs;
 
@@ -602,8 +524,7 @@ public sealed class MicRecorder : IDisposable
         // If you want the “default multimedia” mic, pass Role.Multimedia instead.
     }
 
-    public void Start()
-    {
+    public void Start() {
         if (started) return;
 
         if (device == null) throw new InvalidOperationException("No default capture device.");
@@ -615,19 +536,16 @@ public sealed class MicRecorder : IDisposable
         Console.WriteLine($"[WASAPI] Device: {device.FriendlyName}");
         Console.WriteLine($"[WASAPI] Native format: {inputFormat.SampleRate} Hz, {inputFormat.BitsPerSample}-bit, {inputFormat.Channels} ch, {inputFormat.Encoding}");
 
-        buffered = new BufferedWaveProvider(inputFormat)
-        {
+        buffered = new BufferedWaveProvider(inputFormat) {
             DiscardOnBufferOverflow = true,
             BufferDuration = TimeSpan.FromMilliseconds(500) // headroom for jitter
         };
 
         // 1) Push raw captured bytes into a buffer (native format)
-        capture.DataAvailable += (s, a) =>
-        {
+        capture.DataAvailable += (s, a) => {
             if (a.BytesRecorded > 0) buffered!.AddSamples(a.Buffer, 0, a.BytesRecorded);
         };
-        capture.RecordingStopped += (s, e) =>
-        {
+        capture.RecordingStopped += (s, e) => {
             started = false;
             if (e.Exception != null) Console.WriteLine("[WASAPI] RecordingStopped error: " + e.Exception);
             else Console.WriteLine("[WASAPI] RecordingStopped");
@@ -637,17 +555,14 @@ public sealed class MicRecorder : IDisposable
         //    a) to sample provider (always float)
         ISampleProvider sp = buffered.ToSampleProvider();
         //    b) if stereo, downmix to mono
-        if (sp.WaveFormat.Channels > 1)
-        {
-            sp = new StereoToMonoSampleProvider(sp)
-            {
+        if (sp.WaveFormat.Channels > 1) {
+            sp = new StereoToMonoSampleProvider(sp) {
                 LeftVolume = 0.5f,
                 RightVolume = 0.5f
             };
         }
         //    c) resample to 48k if needed
-        if (sp.WaveFormat.SampleRate != targetSampleRate)
-        {
+        if (sp.WaveFormat.SampleRate != targetSampleRate) {
             sp = new WdlResamplingSampleProvider(sp, targetSampleRate);
         }
         //    d) float → PCM16
@@ -664,51 +579,43 @@ public sealed class MicRecorder : IDisposable
         worker.Start();
     }
 
-    private void ChunkLoop(int bytesPerFrame)
-    {
+    private void ChunkLoop(int bytesPerFrame) {
         var buf = new byte[bytesPerFrame];
 
         // Helpful threshold to avoid tiny reads: about 2 frames worth
         int minReadable = bytesPerFrame * 2;
 
-        while (!disposing && started)
-        {
-            try
-            {
+        while (!disposing && started) {
+            try {
                 // Wait until there's enough audio buffered in the upstream provider
                 // We only know the buffered bytes at the *BufferedWaveProvider* stage,
                 // but wave16Mono48 pulls from that pipeline, so this is a decent proxy.
                 var bufferedBytes = buffered!.BufferedBytes;
-                if (bufferedBytes < minReadable)
-                {
+                if (bufferedBytes < minReadable) {
                     Thread.Sleep(2);
                     continue;
                 }
 
                 int read = wave16Mono48!.Read(buf, 0, buf.Length);
-                if (read == buf.Length)
-                {
+                if (read == buf.Length) {
                     // Copy to avoid reuse
                     var frame = new byte[read];
                     Buffer.BlockCopy(buf, 0, frame, 0, read);
                     frames.Enqueue(frame);
                 }
-                else
-                {
+                else {
                     // Underflow or end — back off briefly
                     Thread.Sleep(2);
                 }
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 Console.WriteLine("[WASAPI] ChunkLoop error: " + ex.Message);
                 Thread.Sleep(10);
             }
         }
     }
 
-    public void Stop()
-    {
+    public void Stop() {
         if (!started) return;
         try { capture?.StopRecording(); } catch { }
         started = false;
@@ -716,8 +623,7 @@ public sealed class MicRecorder : IDisposable
 
     public bool TryDequeue(out byte[]? buffer) => frames.TryDequeue(out buffer);
 
-    public void Dispose()
-    {
+    public void Dispose() {
         disposing = true;
         Stop();
         try { worker?.Join(200); } catch { }
@@ -726,16 +632,13 @@ public sealed class MicRecorder : IDisposable
     }
 }
 
-public sealed class Pcm16Player : IDisposable
-{
+public sealed class Pcm16Player : IDisposable {
     private readonly WaveFormat fmt = new WaveFormat(48000, 16, 1); // 48k / 16-bit / mono
     private readonly WaveOutEvent outDev;
     private readonly BufferedWaveProvider buffer;
 
-    public Pcm16Player(int latencyMs = 100, int jitterMs = 500)
-    {
-        buffer = new BufferedWaveProvider(fmt)
-        {
+    public Pcm16Player(int latencyMs = 100, int jitterMs = 500) {
+        buffer = new BufferedWaveProvider(fmt) {
             DiscardOnBufferOverflow = true,
             BufferDuration = TimeSpan.FromMilliseconds(jitterMs)
         };
@@ -748,8 +651,7 @@ public sealed class Pcm16Player : IDisposable
     public void AddFrame(byte[] frame, int offset, int count)
         => buffer.AddSamples(frame, offset, count);
 
-    public void Dispose()
-    {
+    public void Dispose() {
         outDev?.Stop();
         outDev?.Dispose();
     }

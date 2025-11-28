@@ -1,5 +1,4 @@
-﻿using Common;
-using NAudio;
+using Common;
 using NAudio.Wave;
 using System.Collections.Concurrent;
 using System.Net;
@@ -9,24 +8,19 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Linq;
 
 namespace Client_Server;
-public class Server : IAsyncDisposable
-{
+public class Server : IAsyncDisposable {
     // === Networking ===
     private Socket listener;
     private static string Name = "Server";
 
     // === Connection Handling ===
-    private sealed class Conn
-    {
+    private sealed class Conn {
         public Socket socket { get; }
         public Stream io { get; }
 
-        public Conn(Socket s, Stream i)
-        {
+        public Conn(Socket s, Stream i) {
             socket = s;
             io = i;
         }
@@ -74,8 +68,7 @@ public class Server : IAsyncDisposable
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     // === Main Server Loop ===
-    public async Task ExecuteServerAsync(int port)
-    {
+    public async Task ExecuteServerAsync(int port) {
         string ip = Utility.GetLocalIP();
         Console.Title = "Server";
         await InitListener(ip);
@@ -87,22 +80,17 @@ public class Server : IAsyncDisposable
 
         try { await Task.WhenAll(acceptTask, consoleTask); } catch { }
     }
-    public async Task InitListener(string ip)
-    {
+    public async Task InitListener(string ip) {
         await ReadPasswords(passwordsFile);
         IPAddress ipAddr;
-        if (ip == "")
-        {
+        if (ip == "") {
             ipAddr = IPAddress.Loopback; //127.0.0.1
         }
-        else
-        {
-            try
-            {
+        else {
+            try {
                 ipAddr = IPAddress.Parse(ip);
             }
-            catch (FormatException)
-            {
+            catch (FormatException) {
                 Error?.Invoke("Invalid IP address format.");
                 throw;
             }
@@ -116,31 +104,24 @@ public class Server : IAsyncDisposable
         listener.Listen(10);
     }
 
-    
-    public async Task AcceptLoopAsync()
-    {
-        try
-        {
-            while (true)
-            {
+
+    public async Task AcceptLoopAsync() {
+        try {
+            while (true) {
                 int id = await WaitForConnectionAsync();
                 _ = HandleClientAsync(id);
             }
         }
-        catch (OperationCanceledException)
-        {
+        catch (OperationCanceledException) {
             Error?.Invoke("Server is shutting down.");
         }
-        finally
-        {
+        finally {
             try { listener.Close(); } catch { }
         }
     }
 
-    private void StartUdpListenerIfNeeded()
-    {
-        if (udp != null || listeningIp is null)
-        {
+    private void StartUdpListenerIfNeeded() {
+        if (udp != null || listeningIp is null) {
             return;
         }
 
@@ -149,68 +130,56 @@ public class Server : IAsyncDisposable
         _ = Task.Run(() => UdpReceiveLoopAsync(udp));
     }
 
-    public async Task UdpReceiveLoopAsync(Socket udp)
-    {
+    public async Task UdpReceiveLoopAsync(Socket udp) {
         MessageReceived?.Invoke("UDP Listener", "Started UDP receive loop.");
         var buf = new byte[4096];
         EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
 
-        while (true)
-        {
-            try
-            {
+        while (true) {
+            try {
                 var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
                 Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
                 var from = (IPEndPoint)result.RemoteEndPoint;
-                if (!packet.Headers.TryGetValue("Type", out var type) || type != "Audio")
-                {
+                if (!packet.Headers.TryGetValue("Type", out var type) || type != "Audio") {
                     Notification?.Invoke(NotificationType.Info, $"Ignoring non-audio UDP packet from {from}");
                     continue;
                 }
 
                 _player!.AddFrame(packet.Payload, 0, packet.Payload.Length);
             }
-            catch (ObjectDisposedException)
-            {
+            catch (ObjectDisposedException) {
                 Notification?.Invoke(NotificationType.Info, "UDP listener stopped.");
                 break;
             }
-            catch (SocketException)
-            {
+            catch (SocketException) {
                 Notification?.Invoke(NotificationType.Info, "UDP listener stopped due to socket closure.");
                 break;
             }
         }
     }
 
-    public async Task UdpSendAsync(Socket udp, string ip, int port, string message)
-    {
+    public async Task UdpSendAsync(Socket udp, string ip, int port, string message) {
         IPAddress ipAddr = IPAddress.Parse(ip);
         IPEndPoint remoteEndPoint = new IPEndPoint(ipAddr, port);
         var buf = Encoding.UTF8.GetBytes(message);
         await udp.SendToAsync(buf, SocketFlags.None, remoteEndPoint);
     }
 
-    private void CloseUdpConnection()
-    {
+    private void CloseUdpConnection() {
         Socket? socketToClose = null;
-        lock (udpLock)
-        {
-            if (udp != null)
-            {
+        lock (udpLock) {
+            if (udp != null) {
                 socketToClose = udp;
                 udp = null;
             }
         }
 
-        if (socketToClose != null)
-        {
+        if (socketToClose != null) {
             try { socketToClose.Close(); } catch { }
             Notification?.Invoke(NotificationType.Info, "Closed local UDP connection.");
         }
     }
-    public async Task<int> WaitForConnectionAsync()
-    {
+    public async Task<int> WaitForConnectionAsync() {
         Notification?.Invoke(NotificationType.Info, "Waiting for connection...");
         Socket client = await listener.AcceptAsync();
         //Uses the Nagle algorithm (google for more info)
@@ -219,8 +188,7 @@ public class Server : IAsyncDisposable
         var net = new NetworkStream(client, ownsSocket: true);
         Stream stream = net;
 
-        try
-        {
+        try {
             var cert = LoadServerCertificate();
             var ssl = new SslStream(net, leaveInnerStreamOpen: false);
 
@@ -234,15 +202,13 @@ public class Server : IAsyncDisposable
             stream = ssl;
             Notification?.Invoke(NotificationType.Info, "SSL certificate loaded successfully. Using encrypted connection.");
         }
-        catch (InvalidOperationException)
-        {
+        catch (InvalidOperationException) {
             Notification?.Invoke(NotificationType.Warning,
                 "WARNING: SSL certificate is not present. " +
                 "Ignore this if you intend to use it unencrypted, otherwise refer to the README for instructions on setting up a dev certificate.");
             stream = net; // Fallback to non-SSL
         }
-        catch (Exception e)
-        {
+        catch (Exception e) {
             Notification?.Invoke(NotificationType.Error, $"Failed to establish SSL: {e.Message}. Falling back to unencrypted connection.");
             stream = net; // Fallback to non-SSL
         }
@@ -256,39 +222,32 @@ public class Server : IAsyncDisposable
     }
 
 
-    public async Task HandleClientAsync(int id)
-    {
+    public async Task HandleClientAsync(int id) {
         //Sends the packet to tell the client what its id is
-        while (true)
-        {
+        while (true) {
             bool keepAlive = await ProcessPacketAsync(id);
             if (!keepAlive) break;
         }
     }
 
-    public async Task<bool> ProcessPacketAsync(int id)
-    {
+    public async Task<bool> ProcessPacketAsync(int id) {
         var conn = clients[id];
         PacketStatus status;
         Packet incoming = null;
-        try
-        {
+        try {
             var (s, i) = await PacketIO.ReceivePacketAsync(conn.io);
             status = s;
             incoming = i;
         }
-        catch
-        {
+        catch {
             status = PacketStatus.Disconnected;
         }
-        if (status == PacketStatus.Disconnected)
-        {
+        if (status == PacketStatus.Disconnected) {
             Notification?.Invoke(NotificationType.Warning, $"Client {id} forcibly disconnected");
             RemoveClient(id);
             return false;
         }
-        else if (status == PacketStatus.Error)
-        {
+        else if (status == PacketStatus.Error) {
             Error?.Invoke("An error occured trying to receive the last packet. Closing connection.");
             RemoveClient(id);
             return false;
@@ -298,10 +257,9 @@ public class Server : IAsyncDisposable
         var headers = incoming.Headers;
         var text = Encoding.UTF8.GetString(incoming.Payload);
         //Default values for the packet
-        Packet reply = new Packet
-        {
+        Packet reply = new Packet {
             ClientID = "Server",
-            Headers = new Dictionary<string, string> { { "Type", "Message"} },
+            Headers = new Dictionary<string, string> { { "Type", "Message" } },
             Payload = Encoding.UTF8.GetBytes("")
         };
 
@@ -310,25 +268,21 @@ public class Server : IAsyncDisposable
         var type = headers["Type"];
 
         //Before actually processing the packet, check pendingResponses
-        if (pendingResponses.TryRemove(type, out var tcs))
-        {
+        if (pendingResponses.TryRemove(type, out var tcs)) {
             tcs.SetResult(incoming);
             return true;
         }
 
-        switch (type)
-        {
+        switch (type) {
             case ("Message"):
                 Notification?.Invoke(NotificationType.Info, $"{clientID} sent chat {text}");
                 await BroadcastAsync(incoming, id);
                 return true;
             case ("Command"):
-                switch (text.Split(" ")[0])
-                {
+                switch (text.Split(" ")[0]) {
                     case "help":
                         StringBuilder sb = new StringBuilder("Available Commands: ");
-                        foreach (string cmd in commands)
-                        {
+                        foreach (string cmd in commands) {
                             sb.Append($"--{cmd} ");
                         }
                         reply.Payload = Encoding.ASCII.GetBytes(sb.ToString());
@@ -338,8 +292,7 @@ public class Server : IAsyncDisposable
                     case "whisper":
                     case "w":
                         string[] args = text.Split(" ");
-                        if (args.Length < 3)
-                        {
+                        if (args.Length < 3) {
                             reply.Payload = Encoding.ASCII.GetBytes("Usage: --whisper <ID> <message>");
                             await PacketIO.SendPacketAsync(conn.io, reply);
                             return true;
@@ -348,11 +301,9 @@ public class Server : IAsyncDisposable
                         //Step 2: If using ID, no changes made. If using name, look up ID
                         //Step 3: Check if ID exists
                         //Step 4: Send message if it does, error if it doesn't
-                        if (!int.TryParse(args[1], out int targetID))
-                        {
+                        if (!int.TryParse(args[1], out int targetID)) {
                             //User used a name instead of an ID
-                            if (!names.ContainsKey(args[1]))
-                            {
+                            if (!names.ContainsKey(args[1])) {
                                 reply.Payload = Encoding.ASCII.GetBytes($"User with name {args[1]} not found.");
                                 await PacketIO.SendPacketAsync(conn.io, reply);
                                 return true;
@@ -360,15 +311,13 @@ public class Server : IAsyncDisposable
                             //Name exists, get ID
                             targetID = names[args[1]];
                         }
-                        if (!clients.ContainsKey(targetID))
-                        {
+                        if (!clients.ContainsKey(targetID)) {
                             reply.Payload = Encoding.ASCII.GetBytes($"User with ID {targetID} not found.");
                             await PacketIO.SendPacketAsync(conn.io, reply);
                             return true;
                         }
                         string msg = string.Join(" ", args, 2, args.Length - 2);
-                        Packet whisper = new Packet
-                        {
+                        Packet whisper = new Packet {
                             ClientID = clientID,
                             Headers = new Dictionary<string, string> { { "Type", "Whisper" } },
                             Payload = Encoding.ASCII.GetBytes($"{msg}")
@@ -378,8 +327,7 @@ public class Server : IAsyncDisposable
                     case "create":
                         return true;
                     default:
-                        reply = new Packet
-                        {
+                        reply = new Packet {
                             ClientID = "Server",
                             Headers = new Dictionary<string, string> { { "Type", "Message" } },
                             Payload = Encoding.ASCII.GetBytes($"Unknown command: {text}. Type --help for a list of commands.")
@@ -393,34 +341,28 @@ public class Server : IAsyncDisposable
                 voiceInviteCts?.Cancel();
                 voiceInviteCts = new CancellationTokenSource();
                 var cts = voiceInviteCts;
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
+                _ = Task.Run(async () => {
+                    try {
                         await Task.Delay(TimeSpan.FromMinutes(3), cts.Token);
-                        if (cts.IsCancellationRequested || pendingVoiceClientId != id)
-                        {
+                        if (cts.IsCancellationRequested || pendingVoiceClientId != id) {
                             return;
                         }
 
                         pendingVoiceClientId = null;
                         voiceInviteCts = null;
-                        var expirePacket = new Packet
-                        {
+                        var expirePacket = new Packet {
                             ClientID = "Server",
                             Headers = new Dictionary<string, string> { { "Type", "VoiceInviteExpired" } },
                             Payload = Array.Empty<byte>()
                         };
 
-                        if (clients.TryGetValue(id, out var inviteConn))
-                        {
+                        if (clients.TryGetValue(id, out var inviteConn)) {
                             await PacketIO.SendPacketAsync(inviteConn.io, expirePacket);
                         }
 
                         Notification?.Invoke(NotificationType.Warning, "Voice invite expired after 3 minutes.");
                     }
-                    catch (TaskCanceledException)
-                    {
+                    catch (TaskCanceledException) {
                     }
                 });
                 return true;
@@ -437,8 +379,7 @@ public class Server : IAsyncDisposable
                 return true;
             case "Auth":
                 //Authentication packet containing the client's password
-                switch (await AuthenticateClient(clientID, text, id))
-                {
+                switch (await AuthenticateClient(clientID, text, id)) {
                     case AuthenticationStatus.Success:
                         Notification?.Invoke(NotificationType.Info, $"Client {id} authenticated successfully as {clientID}.");
                         names[clientID] = id;
@@ -476,10 +417,8 @@ public class Server : IAsyncDisposable
                 return true;
             case "AuthCode":
                 int code = 0;
-                if (int.TryParse(text, out code))
-                {
-                    if (code == currentAuthCode)
-                    {
+                if (int.TryParse(text, out code)) {
+                    if (code == currentAuthCode) {
                         Notification?.Invoke(NotificationType.Info, $"Client {id} sent correct auth code {text}.");
                         reply.Headers["Type"] = "AuthStatus";
                         reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Success.ToString());
@@ -494,8 +433,7 @@ public class Server : IAsyncDisposable
                 }
                 return true;
             case "SetPassword":
-                if (!passwords.ContainsKey(clientID))
-                {
+                if (!passwords.ContainsKey(clientID)) {
                     File.AppendAllText(passwordsFile, $"\n{clientID}, {text}");
                     Notification?.Invoke(NotificationType.Info, $"Registered new user {clientID}.");
 
@@ -506,15 +444,13 @@ public class Server : IAsyncDisposable
             case "CreateNewUser":
                 var name = headers["Name"];
                 reply.Headers["Type"] = "AuthStatus";
-                if (name != clientID)
-                {
+                if (name != clientID) {
                     Notification?.Invoke(NotificationType.Warning, "Mismatched username and clientID. Closing connection.");
                     reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Failed.ToString());
                     await PacketIO.SendPacketAsync(conn.io, reply);
                     return false;
                 }
-                if (passwords.ContainsKey(clientID))
-                {
+                if (passwords.ContainsKey(clientID)) {
                     Notification?.Invoke(NotificationType.Warning, $"Client {id} tried to register using an existing username. Closing connection.");
                     reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.UsernameTaken.ToString());
                     await PacketIO.SendPacketAsync(conn.io, reply);
@@ -551,26 +487,22 @@ public class Server : IAsyncDisposable
                 Notification?.Invoke(NotificationType.Warning, $"Invalid packet header: {type}.");
                 break;
         }
-        
+
         return false;
     }
 
 
     // === Server-Exclusive Messaging Functions ===
-    private async Task BroadcastAsync(Packet packet, int? excludeID = null)
-    {
-        foreach (var currClient in clients)
-        {
+    private async Task BroadcastAsync(Packet packet, int? excludeID = null) {
+        foreach (var currClient in clients) {
             if (currClient.Key == excludeID) continue; //Skip sending to the original sender
             Notification?.Invoke(NotificationType.Info, $"Sending reply to client {currClient.Key}.");
             await PacketIO.SendPacketAsync(currClient.Value.io, packet);
         }
     }
 
-    private async Task BroadcastDisconnectAsync(string reason)
-    {
-        var packet = new Packet
-        {
+    private async Task BroadcastDisconnectAsync(string reason) {
+        var packet = new Packet {
             ClientID = "Server",
             Headers = new Dictionary<string, string> { { "Type", "Disconnect" } },
             Payload = Encoding.UTF8.GetBytes(reason)
@@ -580,10 +512,8 @@ public class Server : IAsyncDisposable
         CloseUdpConnection();
     }
 
-    private async Task SendInitialPackets(Stream stream, int id)
-    {
-        Packet pkt = new Packet
-        {
+    private async Task SendInitialPackets(Stream stream, int id) {
+        Packet pkt = new Packet {
             ClientID = "Server",
             Headers = new Dictionary<string, string>
             {
@@ -606,40 +536,30 @@ public class Server : IAsyncDisposable
     }
 
     // === Client Authentication ===
-    private async Task<AuthenticationStatus> AuthenticateClient(string username, string passwordHash, int clientId)
-    {
-        if (names.TryGetValue(username, out var existingId))
-        {
-            if (!clients.ContainsKey(existingId))
-            {
+    private async Task<AuthenticationStatus> AuthenticateClient(string username, string passwordHash, int clientId) {
+        if (names.TryGetValue(username, out var existingId)) {
+            if (!clients.ContainsKey(existingId)) {
                 names.TryRemove(username, out _);
             }
-            else if (existingId != clientId)
-            {
+            else if (existingId != clientId) {
                 return AuthenticationStatus.AlreadyLoggedIn;
             }
         }
-        if (!passwords.ContainsKey(username))
-        {
+        if (!passwords.ContainsKey(username)) {
             return AuthenticationStatus.WrongUsername;
         }
-        if (passwords[username] != passwordHash)
-        {
+        if (passwords[username] != passwordHash) {
             return AuthenticationStatus.WrongPassword;
         }
         return AuthenticationStatus.Success;
     }
 
-    private async Task ReadPasswords(string filename)
-    {
-        using (var fileReader = File.ReadLines(filename).GetEnumerator())
-        {
-            while (fileReader.MoveNext())
-            {
+    private async Task ReadPasswords(string filename) {
+        using (var fileReader = File.ReadLines(filename).GetEnumerator()) {
+            while (fileReader.MoveNext()) {
                 var line = fileReader.Current;
                 var parts = line.Split(", ");
-                if (parts.Length != 2)
-                {
+                if (parts.Length != 2) {
                     Notification?.Invoke(NotificationType.Info, $"Invalid line in password file: {line}");
                     continue;
                 }
@@ -648,10 +568,8 @@ public class Server : IAsyncDisposable
         }
     }
 
-    private void RemoveClient(int id)
-    {
-        if (clients.TryRemove(id, out var conn))
-        {
+    private void RemoveClient(int id) {
+        if (clients.TryRemove(id, out var conn)) {
             try { conn.io.Dispose(); } catch { }
             try { conn.socket.Dispose(); } catch { }
         }
@@ -659,21 +577,18 @@ public class Server : IAsyncDisposable
         positions.TryRemove(id, out _);
 
         var username = names.FirstOrDefault(kvp => kvp.Value == id).Key;
-        if (!string.IsNullOrEmpty(username))
-        {
+        if (!string.IsNullOrEmpty(username)) {
             names.TryRemove(username, out _);
         }
 
-        if (pendingVoiceClientId == id)
-        {
+        if (pendingVoiceClientId == id) {
             pendingVoiceClientId = null;
             voiceInviteCts?.Cancel();
             voiceInviteCts = null;
         }
     }
 
-    private enum AuthenticationStatus
-    {
+    private enum AuthenticationStatus {
         Success,
         Failed,
         WrongPassword,
@@ -685,11 +600,9 @@ public class Server : IAsyncDisposable
 
 
     // === Certificate Loading ===
-    private X509Certificate2 LoadServerCertificate()
-    {
+    private X509Certificate2 LoadServerCertificate() {
         var thumb = (Environment.GetEnvironmentVariable("SERVER_CERT_THUMBPRINT") ?? "");
-        if (string.IsNullOrEmpty(thumb))
-        {
+        if (string.IsNullOrEmpty(thumb)) {
             throw new InvalidOperationException("SERVER_CERT_THUMBPRINT environment variable not set.");
         }
 
@@ -702,8 +615,7 @@ public class Server : IAsyncDisposable
             .FirstOrDefault(c => c.HasPrivateKey);
 
         //If it's not in local machine, check current user store
-        if (cert == null)
-        {
+        if (cert == null) {
             store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
             store.Open(OpenFlags.ReadOnly);
             cert = store.Certificates
@@ -718,102 +630,104 @@ public class Server : IAsyncDisposable
 
 
     // === Server Console Handling ===
-    private async Task RunServerConsoleAsync()
-    {
-        while (true)
-        {
+    private async Task RunServerConsoleAsync() {
+        while (true) {
             string? line = Console.ReadLine();
             if (line is null) break;
             if (string.IsNullOrEmpty(line)) continue;
-
-            try
-            {
-                await HandleServerCommandAsync(line.Trim());
+            if (line.StartsWith("--")) {
+                //Pass the command minus the '--' to the handler
+                await HandleServerCommandAsync(line[2..]);
+                try {
+                    await HandleServerCommandAsync(line.Trim());
+                }
+                catch (Exception ex) {
+                    Notification?.Invoke(NotificationType.Info, $"Error processing command: {ex.Message}");
+                }
             }
-            catch (Exception ex)
-            {
-                Notification?.Invoke(NotificationType.Info, $"Error processing command: {ex.Message}");
+            else {
+                await SendMessageAsync(line);
             }
         }
     }
 
-    private async Task HandleServerCommandAsync(string line)
-    {
+    private async Task SendMessageAsync(string message) {
+        if (message is null) return;
+        Packet pkt = new Packet {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string>
+            {
+                { "Type", "Message" },
+            },
+            Payload = Encoding.UTF8.GetBytes(message)
+        };
+        await BroadcastAsync(pkt);
+    }
+
+    private async Task HandleServerCommandAsync(string line) {
         if (line is null) return;
 
-        if (line.StartsWith("--"))
-        {
-           var parts = line[2..].Split(' ');
-           var cmd = parts[0];
-           var args = parts.Skip(1).ToArray();
-            switch (cmd)
-            {
-                case "setSaveDir":
-                    if (args.Length != 1)
-                    {
-                        Notification?.Invoke(NotificationType.Info, "Usage: --setSaveDir <directory>");
-                        return;
-                    }
-                    var dir = args[0];
-                    defaultSaveDir = dir;
-                    Notification?.Invoke(NotificationType.Info, $"Default save directory set to {defaultSaveDir}");
+        var parts = line.Split(' ');
+        var cmd = parts[0];
+        var args = parts.Skip(1).ToArray();
+        switch (cmd) {
+            case "setSaveDir":
+                if (args.Length != 1) {
+                    Notification?.Invoke(NotificationType.Info, "Usage: --setSaveDir <directory>");
                     return;
-                case "file":
-                    //skip verification for now
-                    await PacketIO.SendFileAsync(_stream, args[0], pendingResponses);
+                }
+                var dir = args[0];
+                defaultSaveDir = dir;
+                Notification?.Invoke(NotificationType.Info, $"Default save directory set to {defaultSaveDir}");
+                return;
+            case "file":
+                //skip verification for now
+                await PacketIO.SendFileAsync(_stream, args[0], pendingResponses);
+                return;
+            case "accept":
+                if (pendingVoiceClientId is null) {
+                    Notification?.Invoke(NotificationType.Info, "No pending voice invite to accept.");
                     return;
-                case "accept":
-                    if (pendingVoiceClientId is null)
-                    {
-                        Notification?.Invoke(NotificationType.Info, "No pending voice invite to accept.");
-                        return;
-                    }
+                }
 
-                    var inviteId = pendingVoiceClientId.Value;
-                    pendingVoiceClientId = null;
-                    voiceInviteCts?.Cancel();
-                    voiceInviteCts = null;
+                var inviteId = pendingVoiceClientId.Value;
+                pendingVoiceClientId = null;
+                voiceInviteCts?.Cancel();
+                voiceInviteCts = null;
 
-                    if (clients.TryGetValue(inviteId, out var inviteConn))
-                    {
-                        var acceptPacket = new Packet
-                        {
-                            ClientID = "Server",
-                            Headers = new Dictionary<string, string> { { "Type", "VoiceAccepted" } },
-                            Payload = Array.Empty<byte>()
-                        };
+                if (clients.TryGetValue(inviteId, out var inviteConn)) {
+                    var acceptPacket = new Packet {
+                        ClientID = "Server",
+                        Headers = new Dictionary<string, string> { { "Type", "VoiceAccepted" } },
+                        Payload = Array.Empty<byte>()
+                    };
 
-                        await PacketIO.SendPacketAsync(inviteConn.io, acceptPacket);
-                        StartUdpListenerIfNeeded();
-                        Notification?.Invoke(NotificationType.Info, "Voice invite accepted. UDP listener started.");
-                    }
-                    else
-                    {
-                        Notification?.Invoke(NotificationType.Warning, "Client disconnected before invite could be accepted.");
-                    }
-                    return;
-                case "disconnect":
-                case "dc":
-                    await BroadcastDisconnectAsync("Server requested UDP disconnect.");
-                    return;
-                default:
-                    Notification?.Invoke(NotificationType.Info, "Unknown command.");
-                    return;
-            }
+                    await PacketIO.SendPacketAsync(inviteConn.io, acceptPacket);
+                    StartUdpListenerIfNeeded();
+                    Notification?.Invoke(NotificationType.Info, "Voice invite accepted. UDP listener started.");
+                }
+                else {
+                    Notification?.Invoke(NotificationType.Warning, "Client disconnected before invite could be accepted.");
+                }
+                return;
+            case "disconnect":
+            case "dc":
+                await BroadcastDisconnectAsync("Server requested UDP disconnect.");
+                return;
+            default:
+                Notification?.Invoke(NotificationType.Info, "Unknown command.");
+                return;
         }
     }
 
     // === IDisposable Implementation ===
-    public async ValueTask DisposeAsync()
-    {
+    public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
     }
 
-    static short MaxAbsPcm16(ReadOnlySpan<byte> buf)
-    {
+    static short MaxAbsPcm16(ReadOnlySpan<byte> buf) {
         short max = 0;
-        for (int i = 0; i + 1 < buf.Length; i += 2)
-        {
+        for (int i = 0; i + 1 < buf.Length; i += 2) {
             short s = (short)(buf[i] | (buf[i + 1] << 8)); // little-endian
             short a = (short)Math.Abs(s);
             if (a > max) max = a;

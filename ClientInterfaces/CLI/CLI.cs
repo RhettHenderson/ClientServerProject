@@ -1,27 +1,25 @@
-﻿using System.Text;
 using Common;
+using System.Text;
 
 namespace Client_Server;
 
-class CLI
-{
-    static async Task Main(string[] args)
-    {
+class CLI {
+    static async Task Main(string[] args) {
         var client = new Client();
         client.MessageReceived += (sender, msg) => Console.WriteLine($"{sender}: {msg}");
         client.WhisperReceived += (from, msg) => Console.WriteLine($"(Whisper) {from}: {msg}");
         client.IdAssigned += id => Console.Title = $"Client {id}";
         client.CommandsReceived += cmds => Console.WriteLine("Received commands list.");
-        client.Error += msg =>
-        {
+        client.Error += msg => {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Error: {msg}");
+            Console.Write($"Error: {msg} ");
+            Console.Write("Press any key to exit.");
             Console.ResetColor();
+            Console.ReadKey();
+            Environment.Exit(1);
         };
-        client.Notification += (type, msg) =>
-        {
-            Console.ForegroundColor = type switch
-            {
+        client.Notification += (type, msg) => {
+            Console.ForegroundColor = type switch {
                 NotificationType.Info => ConsoleColor.Green,
                 NotificationType.Warning => ConsoleColor.Yellow,
                 NotificationType.Error => ConsoleColor.Red,
@@ -32,10 +30,9 @@ class CLI
         };
 
         Console.Write("Enter server host or press Enter for this device's IP: ");
-        string? host = Console.ReadLine();
-        if (string.IsNullOrWhiteSpace(host))
-        {
-            host = client.LocalEndPoint.Address.ToString();
+        string host = Console.ReadLine();
+        if (string.IsNullOrWhiteSpace(host)) {
+            host = Utility.GetLocalIP();
         }
         string username = "";
         string password = "";
@@ -45,43 +42,35 @@ class CLI
         password = ReadPassword();
         var hash = Utility.SHA256Hash(password);
 
-        Console.WriteLine($"Connection to server at {host}");
+        Console.WriteLine($"Connecting to server at {host}...");
         await client.ConnectAsync(host, 11111, username, hash);
 
         Console.Title = client.Name;
 
-        while (true)
-        {
+        while (true) {
             var line = Console.ReadLine();
             if (line is null || line == "\\q") break;
 
-            if (line.StartsWith("--file"))
-            {
+            if (line.StartsWith("--file")) {
                 string? localPath = null;
                 string? remoteFilename = null;
                 string? saveLocation = null;
                 args = line[7..].Split(" ");
-                if (args.Length < 1 || args.Length > 5)
-                {
+                if (args.Length < 1 || args.Length > 5) {
                     Console.WriteLine("Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
                     continue;
                 }
-                else
-                {
-                    for (int i = 0; i < args.Length; i++)
-                    {
-                        if (i == 0)
-                        {
+                else {
+                    for (int i = 0; i < args.Length; i++) {
+                        if (i == 0) {
                             localPath = args[i];
                         }
-                        else if (args[i] == "-r" && i + 1 < args.Length)
-                        {
+                        else if (args[i] == "-r" && i + 1 < args.Length) {
                             remoteFilename = args[i + 1];
                             i++;
                             continue;
                         }
-                        else if (args[i] == "-s" && i + 1 < args.Length)
-                        {
+                        else if (args[i] == "-s" && i + 1 < args.Length) {
                             saveLocation = args[i + 1];
                             i++;
                             continue;
@@ -90,30 +79,24 @@ class CLI
                 }
                 await PacketIO.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
             }
-            else if (line.StartsWith("--voice"))
-            {
+            else if (line.StartsWith("--voice")) {
                 await client.SendVoiceInviteAsync();
             }
-            else if (line.StartsWith("--disconnect") || line.StartsWith("--dc"))
-            {
+            else if (line.StartsWith("--disconnect") || line.StartsWith("--dc")) {
                 await client.SendDisconnectAsync("Client requested UDP disconnect.");
             }
-            else if (line.StartsWith("--"))
-            {
-                 await client.SendCommandAsync(line[2..]);
+            else if (line.StartsWith("--")) {
+                await client.SendCommandAsync(line[2..]);
             }
-            else
-            {
+            else {
                 await client.SendMessageAsync(line);
             }
         }
     }
 
-    static string ReadPassword()
-    {
+    static string ReadPassword() {
         var sb = new StringBuilder();
-        while (true)
-        {
+        while (true) {
             var key = Console.ReadKey(true);
             if (key.Key == ConsoleKey.Enter) break;
             if (key.Key == ConsoleKey.Backspace && sb.Length > 0) { sb.Remove(sb.Length - 1, 1); Console.Write("\b \b"); }
