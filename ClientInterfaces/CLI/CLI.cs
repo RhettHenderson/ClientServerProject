@@ -6,17 +6,19 @@ namespace Client_Server;
 class CLI {
     static async Task Main(string[] args) {
         var client = new Client();
+        bool disconnected = false;
+        object consoleLock = new object();
         client.MessageReceived += (sender, msg) => Console.WriteLine($"{sender}: {msg}");
         client.WhisperReceived += (from, msg) => Console.WriteLine($"(Whisper) {from}: {msg}");
         client.IdAssigned += id => Console.Title = $"Client {id}";
         client.CommandsReceived += cmds => Console.WriteLine("Received commands list.");
         client.Error += msg => {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.Write($"Error: {msg} ");
-            Console.Write("Press any key to exit.");
-            Console.ResetColor();
-            Console.ReadKey();
-            Environment.Exit(1);
+            disconnected = true;
+            lock (consoleLock) {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.Write($"Error: {msg} ");
+                Console.ResetColor();
+            }
         };
         client.Notification += (type, msg) => {
             Console.ForegroundColor = type switch {
@@ -27,6 +29,13 @@ class CLI {
             };
             Console.WriteLine($"{msg}");
             Console.ResetColor();
+        };
+        client.Disconnected += () => {
+            disconnected = true;
+            lock (consoleLock) {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.Write("Server disconnected.");
+            }
         };
 
         Console.Write("Enter server host or press Enter for this device's IP: ");
@@ -47,51 +56,65 @@ class CLI {
 
         Console.Title = client.Name;
 
-        while (true) {
+        while (!disconnected) {
+            if (disconnected) break;
             var line = Console.ReadLine();
-            if (line is null || line == "\\q") break;
-
-            if (line.StartsWith("--file")) {
-                string? localPath = null;
-                string? remoteFilename = null;
-                string? saveLocation = null;
-                args = line[7..].Split(" ");
-                if (args.Length < 1 || args.Length > 5) {
-                    Console.WriteLine("Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
-                    continue;
-                }
-                else {
-                    for (int i = 0; i < args.Length; i++) {
-                        if (i == 0) {
-                            localPath = args[i];
-                        }
-                        else if (args[i] == "-r" && i + 1 < args.Length) {
-                            remoteFilename = args[i + 1];
-                            i++;
-                            continue;
-                        }
-                        else if (args[i] == "-s" && i + 1 < args.Length) {
-                            saveLocation = args[i + 1];
-                            i++;
-                            continue;
+            if (line is null || line == "\\q" || disconnected) break;
+            try {
+                if (line.StartsWith("--file")) {
+                    string? localPath = null;
+                    string? remoteFilename = null;
+                    string? saveLocation = null;
+                    args = line[7..].Split(" ");
+                    if (args.Length < 1 || args.Length > 5) {
+                        Console.WriteLine("Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
+                        continue;
+                    }
+                    else {
+                        for (int i = 0; i < args.Length; i++) {
+                            if (i == 0) {
+                                localPath = args[i];
+                            }
+                            else if (args[i] == "-r" && i + 1 < args.Length) {
+                                remoteFilename = args[i + 1];
+                                i++;
+                                continue;
+                            }
+                            else if (args[i] == "-s" && i + 1 < args.Length) {
+                                saveLocation = args[i + 1];
+                                i++;
+                                continue;
+                            }
                         }
                     }
+                    await PacketIO.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
                 }
-                await PacketIO.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
+                else if (line.StartsWith("--voice")) {
+                    await client.SendVoiceInviteAsync();
+                }
+                else if (line.StartsWith("--disconnect") || line.StartsWith("--dc")) {
+                    await client.SendDisconnectAsync("Client requested UDP disconnect.");
+                }
+                else if (line.StartsWith("--")) {
+                    await client.SendCommandAsync(line[2..]);
+                }
+                else {
+                    //Move cursor to start of line and add "You: "
+                    var pos = Console.GetCursorPosition();
+                    Console.SetCursorPosition(0, pos.Top - 1);
+                    Console.WriteLine($"You: {line}");
+                    await client.SendMessageAsync(line);
+                }
             }
-            else if (line.StartsWith("--voice")) {
-                await client.SendVoiceInviteAsync();
-            }
-            else if (line.StartsWith("--disconnect") || line.StartsWith("--dc")) {
-                await client.SendDisconnectAsync("Client requested UDP disconnect.");
-            }
-            else if (line.StartsWith("--")) {
-                await client.SendCommandAsync(line[2..]);
-            }
-            else {
-                await client.SendMessageAsync(line);
+            catch (Exception e) {
+                disconnected = true;
+                break;
             }
         }
+        //Here's 
+        Console.Write("Press any key to exit...");
+        Console.ReadKey(intercept: true);
+        Environment.Exit(disconnected ? 1 : 0);
     }
 
     static string ReadPassword() {

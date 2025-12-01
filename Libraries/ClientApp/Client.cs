@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 
 namespace Client_Server;
+
 public class Client : IAsyncDisposable {
     // === Static Fields ===
     private static readonly string defaultSaveDir = @"C:\Users\rhett\Documents\downloads";
