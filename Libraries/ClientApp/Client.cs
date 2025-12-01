@@ -16,6 +16,7 @@ public class Client : IAsyncDisposable {
     private static readonly ConcurrentDictionary<string, FileReceiveState> files = new(); // Current downloads in progress
 
     // === Microphone Fields ===
+    private readonly Pcm16Player _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
 
     // === Instance Fields ===
     private int id = -1;
@@ -231,10 +232,22 @@ public class Client : IAsyncDisposable {
             try {
                 var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
                 var n = result.ReceivedBytes;
-                var from = result.RemoteEndPoint.ToString();
-                from = from ?? "Unknown";
-                var message = Encoding.UTF8.GetString(buf, 0, n);
-                MessageReceived?.Invoke($"UDP Message from {from}: ", message);
+                var from = result.RemoteEndPoint?.ToString() ?? "Unknown";
+
+                try {
+                    var packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, n));
+                    if (packet.Headers.TryGetValue("Type", out var type) && type == "Audio") {
+                        _player.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                        continue;
+                    }
+
+                    var payloadText = Encoding.UTF8.GetString(packet.Payload, 0, packet.Payload.Length);
+                    MessageReceived?.Invoke($"UDP Packet from {from}: ", payloadText);
+                }
+                catch (Exception) {
+                    var message = Encoding.UTF8.GetString(buf, 0, n);
+                    MessageReceived?.Invoke($"UDP Message from {from}: ", message);
+                }
             }
             catch (ObjectDisposedException) {
                 MessageReceived?.Invoke("System", "UDP listener stopped.");
@@ -428,5 +441,6 @@ public class Client : IAsyncDisposable {
     // === IDisposable Implementation ===
     public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
+        try { _player?.Dispose(); } catch { }
     }
 }
