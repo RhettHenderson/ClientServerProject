@@ -64,6 +64,10 @@ public class Server : IAsyncDisposable {
 
     // === Audio Playback ===
     private static Pcm16Player? _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
+    private readonly ConcurrentDictionary<string, IPEndPoint> udpRemotes = new();
+    private MicRecorder? _mic;
+    private Thread? micSenderThread;
+    private bool disableServerMic;
 
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -145,6 +149,8 @@ public class Server : IAsyncDisposable {
                     continue;
                 }
 
+                udpRemotes[packet.ClientID] = from;
+                StartServerMicrophone();
                 _player!.AddFrame(packet.Payload, 0, packet.Payload.Length);
             }
             catch (ObjectDisposedException) {
@@ -165,6 +171,77 @@ public class Server : IAsyncDisposable {
         await udp.SendToAsync(buf, SocketFlags.None, remoteEndPoint);
     }
 
+    private void StartServerMicrophone() {
+        if (disableServerMic || udp is null || _mic != null) {
+            return;
+        }
+
+        try {
+            _mic = new MicRecorder(frameMs: 10);
+            _mic.Start();
+        }
+        catch (Exception ex) {
+            Notification?.Invoke(NotificationType.Warning, $"Unable to start server microphone: {ex.Message}");
+            _mic = null;
+            return;
+        }
+
+        micSenderThread = new Thread(() => {
+            const int bytesPerSample = 2;
+            const int samplesPer10ms = 480;
+            const int maxFrameBytes = samplesPer10ms * bytesPerSample;
+
+            uint seq = 0;
+            int timestampSamples = 0;
+
+            while (_mic != null && udp != null && !disableServerMic) {
+                if (!_mic.TryDequeue(out var frame) || frame is null) {
+                    Thread.Sleep(1);
+                    continue;
+                }
+
+                int offset = 0;
+                while (offset < frame.Length) {
+                    int take = Math.Min(maxFrameBytes, frame.Length - offset);
+                    var slice = new byte[take];
+                    Buffer.BlockCopy(frame, offset, slice, 0, take);
+
+                    var packet = new Packet {
+                        ClientID = Name,
+                        Headers = new Dictionary<string, string>
+                        {
+                            { "Type", "Audio" },
+                            { "Protocol", "UDP" },
+                            { "Seq", seq.ToString() },
+                            { "Ts", timestampSamples.ToString() },
+                            { "Fmt", "PCM16_48k_Mono" }
+                        },
+                        Payload = slice
+                    };
+
+                    foreach (var endpoint in udpRemotes.Values) {
+                        PacketIO.SendPacketToAsyncUdp(udp, packet, endpoint);
+                    }
+
+                    seq++;
+                    timestampSamples += take / bytesPerSample;
+                    offset += take;
+                }
+            }
+        }) { IsBackground = true, Name = "ServerMicSender" };
+
+        micSenderThread.Start();
+        Notification?.Invoke(NotificationType.Info, "Server microphone capture started.");
+    }
+
+    private void StopServerMicrophone() {
+        disableServerMic = false;
+        _mic?.Dispose();
+        _mic = null;
+        try { micSenderThread?.Join(200); } catch { }
+        micSenderThread = null;
+    }
+
     private void CloseUdpConnection() {
         Socket? socketToClose = null;
         lock (udpLock) {
@@ -175,6 +252,7 @@ public class Server : IAsyncDisposable {
         }
 
         if (socketToClose != null) {
+            StopServerMicrophone();
             try { socketToClose.Close(); } catch { }
             Notification?.Invoke(NotificationType.Info, "Closed local UDP connection.");
         }
@@ -588,6 +666,24 @@ public class Server : IAsyncDisposable {
         }
     }
 
+    private static bool IsSameMachine(Socket socket) {
+        if (socket.RemoteEndPoint is not IPEndPoint remote) {
+            return false;
+        }
+
+        if (IPAddress.IsLoopback(remote.Address)) {
+            return true;
+        }
+
+        try {
+            var localAddresses = Dns.GetHostAddresses(Dns.GetHostName());
+            return localAddresses.Any(addr => addr.Equals(remote.Address));
+        }
+        catch {
+            return false;
+        }
+    }
+
     private enum AuthenticationStatus {
         Success,
         Failed,
@@ -704,6 +800,13 @@ public class Server : IAsyncDisposable {
 
                     await PacketIO.SendPacketAsync(inviteConn.io, acceptPacket);
                     StartUdpListenerIfNeeded();
+                    disableServerMic = IsSameMachine(inviteConn.socket);
+                    if (disableServerMic) {
+                        Notification?.Invoke(NotificationType.Info, "Client is local; server microphone disabled.");
+                    }
+                    else {
+                        StartServerMicrophone();
+                    }
                     Notification?.Invoke(NotificationType.Info, "Voice invite accepted. UDP listener started.");
                 }
                 else {
@@ -723,6 +826,7 @@ public class Server : IAsyncDisposable {
     // === IDisposable Implementation ===
     public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
+        StopServerMicrophone();
     }
 
     static short MaxAbsPcm16(ReadOnlySpan<byte> buf) {
