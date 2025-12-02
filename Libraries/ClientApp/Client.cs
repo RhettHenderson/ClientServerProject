@@ -1,4 +1,5 @@
 using Common;
+using Syroot.Windows.IO;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Security;
@@ -12,7 +13,7 @@ namespace Client_Server;
 
 public class Client : IAsyncDisposable {
     // === Static Fields ===
-    private static readonly string defaultSaveDir = @"C:\Users\rhett\Documents\downloads";
+    private static readonly string defaultSaveDir = KnownFolders.Downloads.Path;
     private static readonly ConcurrentDictionary<string, FileReceiveState> files = new(); // Current downloads in progress
 
     // === Microphone Fields ===
