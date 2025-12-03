@@ -11,6 +11,7 @@
         "dependencies": {
           "ClientApp": "1.0.0",
           "Common": "1.0.0",
+          "Syroot.Windows.IO.KnownFolders": "1.3.0",
           "runtimepack.Microsoft.NETCore.App.Runtime.linux-x64": "9.0.11"
         },
         "runtime": {
@@ -811,10 +812,19 @@
           }
         }
       },
+      "Syroot.Windows.IO.KnownFolders/1.3.0": {
+        "runtime": {
+          "lib/netstandard2.0/Syroot.KnownFolders.dll": {
+            "assemblyVersion": "1.3.0.0",
+            "fileVersion": "1.3.0.0"
+          }
+        }
+      },
       "ClientApp/1.0.0": {
         "dependencies": {
           "Common": "1.0.0",
-          "NAudio": "2.2.1"
+          "NAudio": "2.2.1",
+          "Syroot.Windows.IO.KnownFolders": "1.3.0"
         },
         "runtime": {
           "ClientApp.dll": {
@@ -825,7 +835,8 @@
       },
       "Common/1.0.0": {
         "dependencies": {
-          "NAudio": "2.2.1"
+          "NAudio": "2.2.1",
+          "Syroot.Windows.IO.KnownFolders": "1.3.0"
         },
         "runtime": {
           "Common.dll": {
@@ -888,6 +899,13 @@
       "sha512": "sha512-xFHRFwH4x6aq3IxRbewvO33ugJRvZFEOfO62i7uQJRUNW2cnu6BeBTHUS0JD5KBucZbHZaYqxQG8dwZ47ezQuQ==",
       "path": "naudio.winmm/2.2.1",
       "hashPath": "naudio.winmm.2.2.1.nupkg.sha512"
+    },
+    "Syroot.Windows.IO.KnownFolders/1.3.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-WaPjW8y9sACYs8sw9r1V7jjlw4bcF1fyFtga52nGAvCOL4MlMm7P1VZZwWmTDJLNziHRUtrPbRkRdd/Wh5uXlQ==",
+      "path": "syroot.windows.io.knownfolders/1.3.0",
+      "hashPath": "syroot.windows.io.knownfolders.1.3.0.nupkg.sha512"
     },
     "ClientApp/1.0.0": {
       "type": "project",
