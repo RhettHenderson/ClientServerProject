@@ -57,11 +57,14 @@ class CLI {
         Console.Title = client.Name;
 
         while (!disconnected) {
-            if (disconnected) break;
             var line = Console.ReadLine();
             if (line is null || line == "\\q" || disconnected) break;
             try {
                 if (line.StartsWith("--file")) {
+                    if (line.Length < 8) {
+                        Console.WriteLine("Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
+                        continue;
+                    }
                     string? localPath = null;
                     string? remoteFilename = null;
                     string? saveLocation = null;
@@ -107,6 +110,7 @@ class CLI {
                 }
             }
             catch (Exception e) {
+                Console.WriteLine(e.Message);
                 disconnected = true;
                 break;
             }

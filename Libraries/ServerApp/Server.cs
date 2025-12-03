@@ -1,5 +1,6 @@
 using Common;
 using NAudio.Wave;
+using Syroot.Windows.IO;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Security;
@@ -10,6 +11,7 @@ using System.Text;
 using System.Text.Json;
 
 namespace Client_Server;
+
 public class Server : IAsyncDisposable {
     // === Networking ===
     private Socket listener;
@@ -40,7 +42,7 @@ public class Server : IAsyncDisposable {
 
     // === File I/O ===
     private static Stream _stream = null;
-    private static string defaultSaveDir = @"C:\Users\rhett\Documents\uploads";
+    private static string defaultSaveDir = KnownFolders.Downloads.Path;
 
     // === Commands & Misc ===
     private static int nextID = 0;

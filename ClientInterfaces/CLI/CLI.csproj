@@ -1,6 +1,10 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <PackageReference Include="Syroot.Windows.IO.KnownFolders" Version="1.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
 	  <ProjectReference Include="..\..\Libraries\ClientApp\ClientApp.csproj" />
 	  <ProjectReference Include="..\..\Libraries\Common\Common.csproj" />
   </ItemGroup>
