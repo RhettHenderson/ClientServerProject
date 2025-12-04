@@ -43,7 +43,7 @@ public class Server : IAsyncDisposable {
 
     // === File I/O ===
     private static Stream _stream = null;
-    private static string defaultSaveDir = KnownFolders.Downloads.Path;
+    private string defaultSaveDir = "";
 
     // === Commands & Misc ===
     private static int nextID = 0;
@@ -81,6 +81,12 @@ public class Server : IAsyncDisposable {
     public async Task ExecuteServerAsync(int port) {
         string ip = Utility.GetLocalIP();
         Console.Title = "Server";
+        try {
+            defaultSaveDir = KnownFolders.Downloads.Path;
+        }
+        catch (Exception e) {
+            defaultSaveDir = "/downloads";
+        }
         await InitListener(ip);
 
         var acceptTask = AcceptLoopAsync();
