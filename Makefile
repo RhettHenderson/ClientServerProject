@@ -83,13 +83,13 @@ build-client-cli:
 # -----------------------------
 client-cli-win:
 	@echo. 
-	@echo == Publishing Client CLI (Windows AOT) ==
-	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(AOT) -o $(OUTDIR)/windows-client-aot
+	@echo == Publishing Client CLI (Windows Single File) ==
+	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(SINGLE) -o $(OUTDIR)/windows-client-single
 
 server-cli-win:
 	@echo. 
-	@echo == Publishing Server CLI (Windows AOT) ==
-	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(AOT) -o $(OUTDIR)/windows-server-aot
+	@echo == Publishing Server CLI (Windows Single File) ==
+	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(SINGLE) -o $(OUTDIR)/windows-server-single
 
 client-cli-linux:
 	@echo. 
