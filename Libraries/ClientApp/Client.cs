@@ -242,6 +242,9 @@ public class Client : IAsyncDisposable {
                 try {
                     var packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, n));
                     if (packet.Headers.TryGetValue("Type", out var type) && type == "Audio") {
+                        if (packet.ClientID == Name) {
+                            continue; // Ignore our own audio packets
+                        }
                         if (PlatformName == "Windows") {
                             EnsurePlayer();
                             _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
