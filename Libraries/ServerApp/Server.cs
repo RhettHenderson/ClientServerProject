@@ -520,6 +520,13 @@ public class Server : IAsyncDisposable {
                     voiceParticipants[0] = 1;
                 }
 
+                if (voiceParticipants.Count == 1) {
+                    Notification?.Invoke(NotificationType.Warning, $"{clientID} tried to make a voice room with only themselves. Rejecting.");
+                    await SendVoiceInviteWarningAsync(id, "You can't make a voice room with just yourself.");
+                    voiceParticipants.Clear();
+                    return true;
+                }
+
                 foreach (var participantId in participants) {
                     if (clients.TryGetValue(participantId, out var participantConn)) {
                         var acceptPacket = new Packet {
