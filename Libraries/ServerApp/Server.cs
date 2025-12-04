@@ -705,8 +705,6 @@ public class Server : IAsyncDisposable {
 
             await PacketIO.SendPacketAsync(conn.io, packet);
         }
-
-        Notification?.Invoke(NotificationType.Warning, message);
     }
 
     private async Task BroadcastDisconnectAsync(string reason) {
