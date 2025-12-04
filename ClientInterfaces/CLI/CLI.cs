@@ -52,8 +52,14 @@ class CLI {
         password = ReadPassword();
         var hash = Utility.SHA256Hash(password);
 
-        Console.WriteLine($"Connecting to server at {host}...");
-        await client.ConnectAsync(host, 11111, username, hash);
+        int port = 11111;
+        var portEnv = Environment.GetEnvironmentVariable("APP_PORT");
+        if (!string.IsNullOrWhiteSpace(portEnv) && int.TryParse(portEnv, out var parsedPort)) {
+            port = parsedPort;
+        }
+
+        Console.WriteLine($"Connecting to server at {host}:{port}...");
+        await client.ConnectAsync(host, port, username, hash);
 
         Console.Title = client.Name;
 

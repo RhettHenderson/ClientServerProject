@@ -49,8 +49,8 @@ public class Server : IAsyncDisposable {
     private static int nextID = 0;
     private static readonly string[] commands = { "help", "whisper", "w", "disconnect", "dc" };
     private static readonly byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands, CommonJsonContext.Default.StringArray);
-    private IPAddress? listeningIp;
-    private int listeningPort = 11111;
+    public IPAddress? listeningIp { get; private set; }
+    public int listeningPort {get; private set; }
     private Socket? udp;
     private readonly object udpLock = new();
     private int? pendingVoiceClientId;
@@ -80,6 +80,7 @@ public class Server : IAsyncDisposable {
     // === Main Server Loop ===
     public async Task ExecuteServerAsync(int port) {
         string ip = Utility.GetLocalIP();
+        listeningPort = port;
         Console.Title = "Server";
         try {
             defaultSaveDir = KnownFolders.Downloads.Path;
@@ -112,7 +113,6 @@ public class Server : IAsyncDisposable {
             }
         }
         listeningIp = ipAddr;
-        listeningPort = 11111;
         IPEndPoint localEndPoint = new IPEndPoint(ipAddr, listeningPort);
         //Create TCP Socket
         listener = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
