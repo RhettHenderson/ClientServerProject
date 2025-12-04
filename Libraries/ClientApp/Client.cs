@@ -8,6 +8,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using System.Linq;
 
 namespace Client_Server;
 
@@ -17,12 +18,13 @@ public class Client : IAsyncDisposable {
     private static readonly ConcurrentDictionary<string, FileReceiveState> files = new(); // Current downloads in progress
 
     // === Microphone Fields ===
-    private readonly Pcm16Player _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
+    private Pcm16Player? _player;
 
     // === Instance Fields ===
     private int id = -1;
     private bool userExists = false;
     private string[] commands = Array.Empty<string>();
+    private bool playbackWarningSent = false;
     private IPAddress? serverIp;
     private int serverPort;
     private Socket? udp;
@@ -32,6 +34,7 @@ public class Client : IAsyncDisposable {
     public string? Name { get; private set; }
     public Stream? _stream { get; set; }
     public IPEndPoint? LocalEndPoint { get; private set; }
+    public string PlatformName { get; } = Utility.GetPlatformName();
     // === Dictionaries / State ===
     public ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses { get; } = new();
 
@@ -166,7 +169,8 @@ public class Client : IAsyncDisposable {
                                     ClientID = Name,
                                     Headers = new Dictionary<string, string>
                                 {
-                                    { "Type", "Ack" }
+                                    { "Type", "Ack" },
+                                    { "Platform", PlatformName }
                                 },
                                     Payload = Array.Empty<byte>()
                                 };
@@ -238,7 +242,14 @@ public class Client : IAsyncDisposable {
                 try {
                     var packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, n));
                     if (packet.Headers.TryGetValue("Type", out var type) && type == "Audio") {
-                        _player.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                        if (PlatformName == "Windows") {
+                            EnsurePlayer();
+                            _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                        }
+                        else if (!playbackWarningSent) {
+                            playbackWarningSent = true;
+                            Notification?.Invoke(NotificationType.Warning, "Audio playback is only available on Windows.");
+                        }
                         continue;
                     }
 
@@ -267,13 +278,13 @@ public class Client : IAsyncDisposable {
         await PacketIO.SendPacketToAsyncUdp(udp, packet, remoteEndPoint);
     }
 
-    public async Task SendVoiceInviteAsync() {
+    public async Task SendVoiceInviteAsync(IEnumerable<string> invitees) {
         if (_stream is null) throw new InvalidOperationException("Not connected.");
 
         await PacketIO.SendPacketAsync(_stream, new Packet {
             ClientID = Name,
             Headers = new Dictionary<string, string> { { "Type", "VoiceInvite" } },
-            Payload = Array.Empty<byte>()
+            Payload = JsonSerializer.SerializeToUtf8Bytes(invitees.ToArray(), Common.CommonJsonContext.Default.StringArray)
         });
     }
 
@@ -443,5 +454,13 @@ public class Client : IAsyncDisposable {
     public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
         try { _player?.Dispose(); } catch { }
+    }
+
+    private void EnsurePlayer() {
+        if (_player != null || PlatformName != "Windows") {
+            return;
+        }
+
+        _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
     }
 }

@@ -4,10 +4,12 @@ using NAudio.Wave.SampleProviders;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 
 namespace Common;
 
@@ -496,6 +498,20 @@ public static class Utility {
         }
         //Fallback
         return "127.0.0.1";
+    }
+
+    public static string GetPlatformName() {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+            return "Windows";
+        }
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) {
+            return "macOS";
+        }
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) {
+            return "Linux";
+        }
+
+        return "Unknown";
     }
 }
 

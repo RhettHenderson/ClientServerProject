@@ -9,6 +9,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using System.Linq;
 
 namespace Client_Server;
 
@@ -54,6 +55,10 @@ public class Server : IAsyncDisposable {
     private readonly object udpLock = new();
     private int? pendingVoiceClientId;
     private CancellationTokenSource? voiceInviteCts;
+    private readonly ConcurrentDictionary<int, IPEndPoint> udpClients = new();
+    private readonly ConcurrentDictionary<int, string> clientPlatforms = new();
+    private readonly ConcurrentDictionary<int, byte> voiceParticipants = new();
+    private readonly string serverPlatform = Utility.GetPlatformName();
 
     // === Events and Actions ===
     public event Action<string, string>? MessageReceived;   // (from, text)
@@ -65,8 +70,7 @@ public class Server : IAsyncDisposable {
     public event Action<NotificationType, string>? Notification;
 
     // === Audio Playback ===
-    private static Pcm16Player? _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
-    private readonly ConcurrentDictionary<string, IPEndPoint> udpRemotes = new();
+    private static Pcm16Player? _player;
     private MicRecorder? _mic;
     private Thread? micSenderThread;
     private bool disableServerMic;
@@ -146,14 +150,25 @@ public class Server : IAsyncDisposable {
                 var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
                 Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
                 var from = (IPEndPoint)result.RemoteEndPoint;
+
+                var senderId = ResolveClientId(packet.ClientID);
+                if (senderId >= 0) {
+                    udpClients[senderId] = from;
+                }
+
                 if (!packet.Headers.TryGetValue("Type", out var type) || type != "Audio") {
                     Notification?.Invoke(NotificationType.Info, $"Ignoring non-audio UDP packet from {from}");
                     continue;
                 }
 
-                udpRemotes[packet.ClientID] = from;
-                StartServerMicrophone();
-                _player!.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                if (senderId >= 0 && voiceParticipants.ContainsKey(senderId)) {
+                    await ForwardAudioAsync(udp, senderId, packet);
+                }
+
+                if (voiceParticipants.ContainsKey(0) && serverPlatform == "Windows") {
+                    EnsureServerPlayer();
+                    _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                }
             }
             catch (ObjectDisposedException) {
                 Notification?.Invoke(NotificationType.Info, "UDP listener stopped.");
@@ -173,8 +188,31 @@ public class Server : IAsyncDisposable {
         await udp.SendToAsync(buf, SocketFlags.None, remoteEndPoint);
     }
 
+    private int ResolveClientId(string clientId) {
+        if (string.Equals(clientId, Name, StringComparison.OrdinalIgnoreCase)) {
+            return 0;
+        }
+
+        if (names.TryGetValue(clientId, out var id)) {
+            return id;
+        }
+
+        return -1;
+    }
+
+    private async Task ForwardAudioAsync(Socket udp, int senderId, Packet packet) {
+        var recipients = udpClients
+            .Where(kv => kv.Key != senderId && voiceParticipants.ContainsKey(kv.Key))
+            .Select(kv => kv.Value)
+            .ToArray();
+
+        foreach (var endpoint in recipients) {
+            await PacketIO.SendPacketToAsyncUdp(udp, packet, endpoint);
+        }
+    }
+
     private void StartServerMicrophone() {
-        if (disableServerMic || udp is null || _mic != null) {
+        if (disableServerMic || udp is null || _mic != null || serverPlatform != "Windows") {
             return;
         }
 
@@ -221,7 +259,12 @@ public class Server : IAsyncDisposable {
                         Payload = slice
                     };
 
-                    foreach (var endpoint in udpRemotes.Values) {
+                    var endpoints = udpClients
+                        .Where(kv => voiceParticipants.ContainsKey(kv.Key))
+                        .Select(kv => kv.Value)
+                        .ToArray();
+
+                    foreach (var endpoint in endpoints) {
                         PacketIO.SendPacketToAsyncUdp(udp, packet, endpoint);
                     }
 
@@ -244,6 +287,14 @@ public class Server : IAsyncDisposable {
         micSenderThread = null;
     }
 
+    private void EnsureServerPlayer() {
+        if (_player != null || serverPlatform != "Windows") {
+            return;
+        }
+
+        _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
+    }
+
     private void CloseUdpConnection() {
         Socket? socketToClose = null;
         lock (udpLock) {
@@ -258,6 +309,9 @@ public class Server : IAsyncDisposable {
             try { socketToClose.Close(); } catch { }
             Notification?.Invoke(NotificationType.Info, "Closed local UDP connection.");
         }
+
+        udpClients.Clear();
+        voiceParticipants.Clear();
     }
     public async Task<int> WaitForConnectionAsync() {
         Notification?.Invoke(NotificationType.Info, "Waiting for connection...");
@@ -417,39 +471,86 @@ public class Server : IAsyncDisposable {
                 }
             case "VoiceInvite":
                 Notification?.Invoke(NotificationType.Info, $"Received voice invite from client {id}.");
-                pendingVoiceClientId = id;
-                voiceInviteCts?.Cancel();
-                voiceInviteCts = new CancellationTokenSource();
-                var cts = voiceInviteCts;
-                _ = Task.Run(async () => {
-                    try {
-                        await Task.Delay(TimeSpan.FromMinutes(3), cts.Token);
-                        if (cts.IsCancellationRequested || pendingVoiceClientId != id) {
-                            return;
-                        }
+                var requestedTargets = Array.Empty<string>();
+                try {
+                    requestedTargets = JsonSerializer.Deserialize(incoming.Payload, Common.CommonJsonContext.Default.StringArray) ?? Array.Empty<string>();
+                }
+                catch (Exception) { }
 
-                        pendingVoiceClientId = null;
-                        voiceInviteCts = null;
-                        var expirePacket = new Packet {
+                var participants = new HashSet<int> { id };
+                bool includeServer = false;
+
+                if (requestedTargets.Length == 0) {
+                    includeServer = serverPlatform == "Windows";
+                    if (!includeServer) {
+                        await SendVoiceInviteWarningAsync(id, "Server cannot join voice on this platform.");
+                    }
+                }
+
+                foreach (var target in requestedTargets) {
+                    if (string.Equals(target, Name, StringComparison.OrdinalIgnoreCase)) {
+                        if (serverPlatform == "Windows") {
+                            includeServer = true;
+                        }
+                        else {
+                            await SendVoiceInviteWarningAsync(id, "Server cannot join voice on this platform.");
+                        }
+                        continue;
+                    }
+
+                    if (!names.TryGetValue(target, out var targetId)) {
+                        await SendVoiceInviteWarningAsync(id, $"Client '{target}' is not connected.");
+                        continue;
+                    }
+
+                    if (clientPlatforms.TryGetValue(targetId, out var platformName) && platformName != "Windows") {
+                        await SendVoiceInviteWarningAsync(id, $"{target} is on {platformName} and cannot join voice chat.");
+                        continue;
+                    }
+
+                    participants.Add(targetId);
+                }
+
+                voiceParticipants.Clear();
+                foreach (var participantId in participants) {
+                    voiceParticipants[participantId] = 1;
+                }
+
+                if (includeServer) {
+                    voiceParticipants[0] = 1;
+                }
+
+                foreach (var participantId in participants) {
+                    if (clients.TryGetValue(participantId, out var participantConn)) {
+                        var acceptPacket = new Packet {
                             ClientID = "Server",
-                            Headers = new Dictionary<string, string> { { "Type", "VoiceInviteExpired" } },
+                            Headers = new Dictionary<string, string> { { "Type", "VoiceAccepted" } },
                             Payload = Array.Empty<byte>()
                         };
-
-                        if (clients.TryGetValue(id, out var inviteConn)) {
-                            await PacketIO.SendPacketAsync(inviteConn.io, expirePacket);
-                        }
-
-                        Notification?.Invoke(NotificationType.Warning, "Voice invite expired after 3 minutes.");
+                        await PacketIO.SendPacketAsync(participantConn.io, acceptPacket);
                     }
-                    catch (TaskCanceledException) {
+                }
+
+                StartUdpListenerIfNeeded();
+                if (includeServer && serverPlatform == "Windows") {
+                    disableServerMic = clients.TryGetValue(id, out var inviterConn) && IsSameMachine(inviterConn.socket);
+                    if (disableServerMic) {
+                        Notification?.Invoke(NotificationType.Info, "Client is local; server microphone disabled.");
                     }
-                });
+                    else {
+                        StartServerMicrophone();
+                    }
+                }
+
+                Notification?.Invoke(NotificationType.Info, $"Voice room created with {participants.Count + (includeServer ? 1 : 0)} participant(s).");
                 return true;
             case "Ack":
                 Notification?.Invoke(NotificationType.Info, $"Received ACK from client {id}.");
                 //Sets the client's name
                 names[clientID] = id;
+                if (headers.TryGetValue("Platform", out var platform)) {
+                    clientPlatforms[id] = platform;
+                }
                 return true;
             case "Pos":
                 //Position update packet
@@ -581,6 +682,20 @@ public class Server : IAsyncDisposable {
         }
     }
 
+    private async Task SendVoiceInviteWarningAsync(int clientId, string message) {
+        if (clients.TryGetValue(clientId, out var conn)) {
+            var packet = new Packet {
+                ClientID = "Server",
+                Headers = new Dictionary<string, string> { { "Type", "Message" } },
+                Payload = Encoding.UTF8.GetBytes(message)
+            };
+
+            await PacketIO.SendPacketAsync(conn.io, packet);
+        }
+
+        Notification?.Invoke(NotificationType.Warning, message);
+    }
+
     private async Task BroadcastDisconnectAsync(string reason) {
         var packet = new Packet {
             ClientID = "Server",
@@ -666,6 +781,10 @@ public class Server : IAsyncDisposable {
             voiceInviteCts?.Cancel();
             voiceInviteCts = null;
         }
+
+        clientPlatforms.TryRemove(id, out _);
+        udpClients.TryRemove(id, out _);
+        voiceParticipants.TryRemove(id, out _);
     }
 
     private static bool IsSameMachine(Socket socket) {

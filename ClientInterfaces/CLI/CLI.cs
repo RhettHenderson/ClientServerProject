@@ -1,4 +1,5 @@
 using Common;
+using System;
 using System.Text;
 
 namespace Client_Server;
@@ -93,7 +94,12 @@ class CLI {
                     await PacketIO.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
                 }
                 else if (line.StartsWith("--voice")) {
-                    await client.SendVoiceInviteAsync();
+                    var inviteeText = line.Length > 8 ? line[8..] : string.Empty;
+                    var invitees = inviteeText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (invitees.Length == 0) {
+                        invitees = new[] { "Server" };
+                    }
+                    await client.SendVoiceInviteAsync(invitees);
                 }
                 else if (line.StartsWith("--disconnect") || line.StartsWith("--dc")) {
                     await client.SendDisconnectAsync("Client requested UDP disconnect.");
