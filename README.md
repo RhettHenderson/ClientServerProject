@@ -4,7 +4,7 @@
 <p>Rhett Henderson</p>
 
 ### License:
-<p>This project is licensed under the GNU General Public License (GPL).</p>
+<p>This project is licensed under the GNU General Public License (GPL) version 3, with additional restrictions regarding commercial use and attribution. See the LICENSE file for exact details.</p>
 
 ## Project Overview
 <p>This repository contains a <strong>Client-Server application</strong> built using C# with both <strong>GUI</strong> and <strong>CLI</strong> components. The application has secure communication via <strong>SSL/TLS</strong> encryption. The <strong>GUI</strong> provides an intuitive interface for users, while the <strong>CLI</strong> offers the same functionality through command-line interactions. Both versions of the application rely on a shared backend to handle data transfer and encryption. Currently, the GUI is in beta and lacks most features. Some in-development features and some planned future features are listed below.</p>
@@ -13,14 +13,13 @@
 
 ## Features in development
 <p>1. VoIP using UDP</p>
-<p>2. File transfer and hosting</p>
+<p>2. File transfer using a custom TCP file protocol, not FTP</p>
 <p>3. WinForms GUI for the client app</p>
 
 ## Features planned for the future
 <p>1. Full WinUI GUI to replace the WinForms.</p>
 <p>2. Full GUI for the server app</p>
 <p>3. SQLite database to store user credentials</p>
-<p>4. Session-awareness</p>
 <p>5. Better first-time setup process to set a server password and other options</p>
 
 ## How to Run the Project
@@ -28,11 +27,17 @@
 <p>Clone or download the repository, then if you have Make installed, you can run <code>make publish</code> to publish the regular binaries or <code>make</code> to build the project solutions.</p>
 <p><strong>Before running, ensure these requirements are met:</strong></p>
 <p>1. Ensure there is a passwords.txt file next to the Server executable, and ensure it has atleast one username-password hash combo in this format: <code>name, hash</code></p>
-<p>2. Ensure you have a certificate setup. See below for instructions on installing a dotnet dev certificate.</p>
+<p>2. An SSL certificate is no longer required, the app will automatically use unencrypted traffic if a certificate can't be found.</p>
+
+## Platform and Feature Support
+<p>The client and server both run on Windows and Linux, and should run on MacOS as well, although I haven't tested that. 
+    However, voice chat currently only works on Windows, as it relies on the WASAPI to capture and playback audio. If you attempt to create a voice room on a non-Windows platform, or invite a non-Windows user, it will display a warning and notify the server.</p>
+<p>The AOT compilation also no longer works due to the audio features, so file sizes are larger, but single-file publishing still works just fine.</p>
+<p>All other features are supported on all platforms, including file transfer. The app will first attempt to locate the Downloads folder (if you're on Windows), otherwise it will check for an environment variable, and finally it will fallback to a hardcoded download folder location. The environment variable feature is there for Docker containers, but can also be used if you want to set the variable yourself.</p>
 
 ## Instructions for Setting Up SSL Certificates
 
-<p>Currently the application only runs with SSL, so it won't work without a certificate for the server. I'm considering adding the option to run without SSL in the future.</p>
+<p>The application can run with or without SSL. If it doesn't detect a certificate, it will fallback to unencrypted traffic and display a warning.</p>
 <p>In order to run the application with SSL, you need to generate a development certificate, add it to Windows certificate manager, and configure the application to use it. Below are the steps to generate a <strong>dotnet dev-cert</strong>, add it to <strong>certmgr</strong> in Windows, and set up the thumbprint as an environment variable.</p>
 
 ### Step 1: Generate a .NET Development Certificate
