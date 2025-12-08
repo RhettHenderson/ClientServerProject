@@ -667,7 +667,17 @@ public class Server : IAsyncDisposable {
                 return true;
             case "FileChunk":
                 await PacketIO.HandleFileChunkAsync(incoming, files);
-                Notification?.Invoke(NotificationType.Info, "Received FileChunk packet");
+
+                //Progress logging
+                if (incoming.Headers.TryGetValue("FileKey", out var key) && files.TryGetValue(key, out var state)) {
+                    int index = int.Parse(incoming.Headers["Index"]);
+                    int currentChunk = index + 1;
+                    int totalChunks = state.ExpectedChunks;
+
+                    double percent = (double)currentChunk / totalChunks * 100.0;
+                    string bar = BuildProgessBar(percent, width: 40);
+                    Notification?.Invoke(NotificationType.Info, $"[PROGRESS]{bar}, chunk {currentChunk}/{totalChunks}");
+                }
                 return true;
             case "FileEnd":
                 await PacketIO.HandleFileEndAsync(conn.io, incoming, files, Name);
@@ -814,6 +824,16 @@ public class Server : IAsyncDisposable {
         catch {
             return false;
         }
+    }
+
+    private static string BuildProgessBar(double percent, int width = 40) {
+        percent = Math.Clamp(percent, 0.0, 100.0);
+        int filled = (int)Math.Round(percent / 100.0 * width);
+        if (filled > width) filled = width;
+
+        string filledPart = new string('\u2588', filled);
+        string emptyPart = new string('-', width - filled);
+        return $"[{filledPart}{emptyPart}] {percent,5:0.0}%";
     }
 
     private enum AuthenticationStatus {

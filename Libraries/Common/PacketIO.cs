@@ -210,7 +210,8 @@ public static class PacketIO {
         ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses,
         string? remoteFilename = null,
         string? saveLocation = null,
-        int chunkSize = 64 * 1024,
+        //Increased from 64kb to 256kb
+        int chunkSize = 256 * 1024,
         Action<NotificationType, string>? Notification = null,
         Action<string>? Error = null) {
         if (!System.IO.File.Exists(localPath)) {
@@ -371,7 +372,7 @@ public static class PacketIO {
     }
 
     public static async Task HandleFileEndAsync(Stream stream, Packet packet, ConcurrentDictionary<string, FileReceiveState> files, string Name) {
-        Console.WriteLine("Beginning file end processing.");
+        Console.WriteLine("\nBeginning file end processing.");
         var headers = packet.Headers;
         var name = headers["Name"];
         var totalChunks = int.Parse(headers["TotalChunks"]);
