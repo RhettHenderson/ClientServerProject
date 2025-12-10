@@ -10,7 +10,7 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="OpenTK.Audio.OpenAL" Version="4.9.4" />
     <PackageReference Include="Syroot.Windows.IO.KnownFolders" Version="1.3.0" />
-      <None Include="runtimes\win-x64\native\openal32.dll">
+      <None Include="runtimes\win-x64\native\openal32.dll" Link="openal32.dll">
           <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
           <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </None>
