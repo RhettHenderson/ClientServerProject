@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -15,4 +15,9 @@
       </None>
   </ItemGroup>
 
+
+    <Target Name="AfterBuild">
+        <RemoveDir Directories="$(ProjectDir)bin\Debug" />
+        <RemoveDir Directories="$(ProjectDir)bin\Release" />
+    </Target>
 </Project>

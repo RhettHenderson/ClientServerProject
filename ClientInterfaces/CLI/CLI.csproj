@@ -14,5 +14,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+    
+  <Target Name="AfterBuild">
+      <RemoveDir Directories="$(ProjectDir)bin\Debug" />
+      <RemoveDir Directories="$(ProjectDir)bin\Release" />
+  </Target>
 
 </Project>

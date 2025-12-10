@@ -11,4 +11,8 @@
     <ProjectReference Include="..\..\Libraries\ServerApp\ServerApp.csproj" />
     <ProjectReference Include="..\..\Libraries\Common\Common.csproj" />
   </ItemGroup>
+  <Target Name="AfterBuild">
+    <RemoveDir Directories="$(ProjectDir)bin\Debug" />
+    <RemoveDir Directories="$(ProjectDir)bin\Release" />
+  </Target>
 </Project>
