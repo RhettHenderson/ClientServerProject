@@ -8,7 +8,6 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
-using System.Linq;
 
 namespace Client_Server;
 
@@ -49,7 +48,7 @@ public class Server : IAsyncDisposable {
     private static readonly string[] commands = { "help", "whisper", "w", "disconnect", "dc" };
     private static readonly byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands, CommonJsonContext.Default.StringArray);
     public IPAddress? listeningIp { get; private set; }
-    public int listeningPort {get; private set; }
+    public int listeningPort { get; private set; }
     private Socket? udp;
     private readonly object udpLock = new();
     private int? pendingVoiceClientId;
@@ -89,12 +88,13 @@ public class Server : IAsyncDisposable {
         }
         await InitListener(ip);
 
-        var acceptTask = AcceptLoopAsync();
-        var consoleTask = Task.Run(() => RunServerConsoleAsync());
+        //var acceptTask = AcceptLoopAsync();
+        //var consoleTask = Task.Run(() => RunServerConsoleAsync());
 
-        await Task.WhenAny(acceptTask, consoleTask);
+        //await Task.WhenAny(acceptTask, consoleTask);
+        await AcceptLoopAsync();
 
-        try { await Task.WhenAll(acceptTask, consoleTask); } catch { }
+        //try { await Task.WhenAll(acceptTask, consoleTask); } catch { }
     }
     public async Task InitListener(string ip) {
         await ReadPasswords(passwordsFile);
@@ -784,7 +784,7 @@ public class Server : IAsyncDisposable {
             }
         }
         catch (FileNotFoundException) {
-            Notification?.Invoke(NotificationType.Warning, "Password file not found. Server is running, but no users can log in until one is made.");
+            Notification?.Invoke(NotificationType.Warning, "Password file not found. Users cannot connect until one is made. \nRun --create <name> <password> to create the file and the first user.");
         }
         catch (Exception e) {
             Notification?.Invoke(NotificationType.Error, $"Unexepected exception: {e.Message}");
@@ -906,7 +906,7 @@ public class Server : IAsyncDisposable {
         }
     }
 
-    private async Task SendMessageAsync(string message) {
+    public async Task SendMessageAsync(string message) {
         if (message is null) return;
         Packet pkt = new Packet {
             ClientID = "Server",
@@ -919,7 +919,7 @@ public class Server : IAsyncDisposable {
         await BroadcastAsync(pkt);
     }
 
-    private async Task HandleServerCommandAsync(string line) {
+    public async Task HandleServerCommandAsync(string line) {
         if (line is null) return;
 
         var parts = line.Split(' ');
@@ -976,10 +976,36 @@ public class Server : IAsyncDisposable {
             case "dc":
                 await BroadcastDisconnectAsync("Server requested UDP disconnect.");
                 return;
+            case "create":
+                if (args.Length != 2) {
+                    Notification?.Invoke(NotificationType.Info, "Usage: --create <username> <password>");
+                    return;
+                }
+                await CreateUserAsync(args[0], args[1]);
+                return;
             default:
                 Notification?.Invoke(NotificationType.Info, "Unknown command.");
                 return;
         }
+    }
+
+    private async Task CreateUserAsync(string name, string password) {
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(password)) {
+            Notification?.Invoke(NotificationType.Warning, "Name or password cannot be empty. Aborting.");
+            return;
+        }
+        if (passwords.ContainsKey(name)) {
+            Notification?.Invoke(NotificationType.Warning, "User with that name already exists. Aborting.");
+            return;
+        }
+        var passwordHash = Utility.SHA256Hash(password);
+        passwords[name] = passwordHash;
+        if (!File.Exists(passwordsFile)) {
+            Notification?.Invoke(NotificationType.Info, "Created passwords.txt file.");
+        }
+        //AppendAllText creates file if it doesn't exist, we just fire the notification first
+        await File.AppendAllTextAsync(passwordsFile, $"{name}, {passwordHash}\n");
+        Notification?.Invoke(NotificationType.Info, $"Created user {name} successfully.");
     }
 
     // === IDisposable Implementation ===
