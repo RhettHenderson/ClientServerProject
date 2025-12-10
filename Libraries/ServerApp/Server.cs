@@ -771,16 +771,24 @@ public class Server : IAsyncDisposable {
     }
 
     private async Task ReadPasswords(string filename) {
-        using (var fileReader = File.ReadLines(filename).GetEnumerator()) {
-            while (fileReader.MoveNext()) {
-                var line = fileReader.Current;
-                var parts = line.Split(", ");
-                if (parts.Length != 2) {
-                    Notification?.Invoke(NotificationType.Info, $"Invalid line in password file: {line}");
-                    continue;
+        try {
+            using (var fileReader = File.ReadLines(filename).GetEnumerator()) {
+                while (fileReader.MoveNext()) {
+                    var line = fileReader.Current;
+                    var parts = line.Split(", ");
+                    if (parts.Length != 2) {
+                        Notification?.Invoke(NotificationType.Info, $"Invalid line in password file: {line}");
+                        continue;
+                    }
+                    passwords[parts[0]] = parts[1];
                 }
-                passwords[parts[0]] = parts[1];
             }
+        }
+        catch (FileNotFoundException) {
+            Notification?.Invoke(NotificationType.Warning, "Password file not found. Server is running, but no users can log in until one is made.");
+        }
+        catch (Exception e) {
+            Notification?.Invoke(NotificationType.Error, $"Unexepected exception: {e.Message}");
         }
     }
 
