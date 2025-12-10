@@ -66,6 +66,8 @@ clientapp:
 # -----------------------------
 # Interfaces (build only; no publish)
 # -----------------------------
+interfaces: build-server-cli build-client-cli
+
 build-server-cli:
 	@echo.
 	@echo == Building Server CLI ==
@@ -76,55 +78,50 @@ build-client-cli:
 	@echo == Building Client CLI ==
 	dotnet build $(CLIENT_CLI_PROJ) -c $(CONFIG)
 
-#For Windows I only publish the full and AOT versions, no single file
-#For Linux, I only publish the full and single file versions, no AOT because it's a pain to compile
+#For Windows I only publish the single file and AOT versions
+#For Linux, I only periodically update the AOT publish because I have to do it from my server
 # -----------------------------
 # Interfaces single file and AOT publish
 # -----------------------------
-client-cli-win:
+client-win:
 	@echo. 
-	@echo == Publishing Client CLI (Windows Single File) ==
+	@echo == Publishing Client (Windows AOT) ==
+	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(AOT) -o $(OUTDIR)/windows-client
+
+client-win-single:
+	@echo. 
+	@echo == Publishing Client (Windows Single File) ==
 	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(SINGLE) -o $(OUTDIR)/windows-client-single
 
-server-cli-win:
+server-win:
 	@echo. 
-	@echo == Publishing Server CLI (Windows Single File) ==
+	@echo == Publishing Server (Windows AOT) ==
+	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(AOT) -o $(OUTDIR)/windows-server
+
+server-win-single:
+	@echo. 
+	@echo == Publishing Server (Windows Single File) ==
 	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(SINGLE) -o $(OUTDIR)/windows-server-single
 
-client-cli-linux:
+client-linux:
 	@echo. 
-	@echo == Publishing Client CLI (Linux single file) ==
-	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(SINGLE) -o $(OUTDIR)/linux-client
+	@echo == Publishing Client (Linux AOT) ==
+	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(AOT) -o $(OUTDIR)/linux-client
 
-server-cli-linux:
+client-linux-single:
 	@echo. 
-	@echo == Publishing ServerCLI (Linux single file) ==
-	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(SINGLE) -o $(OUTDIR)/linux-server
+	@echo == Publishing Client (Linux Single File) ==
+	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(SINGLE) -o $(OUTDIR)/linux-client-single
 
-# -----------------------------
-# Interfaces full version publish
-# -----------------------------
-client-cli-win-full:
+server-linux:
 	@echo. 
-	@echo == Publishing Client CLI (Windows full version) ==
-	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(FULL) -o $(OUTDIR)/windows-client-full
+	@echo == Publishing Server (Linux single file) ==
+	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(AOT) -o $(OUTDIR)/linux-server
 
-server-cli-win-full:
+server-linux-single:
 	@echo. 
-	@echo == Publishing Server CLI (Windows full version) ==
-	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(WINRID) $(FULL) -o $(OUTDIR)/windows-server-full
-
-client-cli-linux-full:
-	@echo. 
-	@echo == Publishing Client CLI (Linux full version) ==
-	dotnet publish $(CLIENT_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(FULL) -o $(OUTDIR)/linux-client-full
-
-server-cli-linux-full:
-	@echo. 
-	@echo == Publishing Server CLI (Linux full version) ==
-	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(FULL) -o $(OUTDIR)/linux-server-full
-
-
+	@echo == Publishing Server (Linux single file) ==
+	dotnet publish $(SERVER_CLI_PROJ) -c $(CONFIG) -r $(LINUXRID) $(SINGLE) -o $(OUTDIR)/linux-server-single
 
 # -----------------------------
 # Utilities
