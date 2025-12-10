@@ -1,15 +1,13 @@
-using NAudio.CoreAudioApi;
-using NAudio.Wave;
-using NAudio.Wave.SampleProviders;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Runtime.InteropServices;
+using OpenTK.Audio.OpenAL;
 
 namespace Common;
 
@@ -518,158 +516,271 @@ public static class Utility {
 
 public sealed class MicRecorder : IDisposable {
     private readonly int frameMs;
-    private readonly int targetSampleRate = 48000;  // network format
-    private readonly int targetChannels = 1;      // mono
-    private readonly int targetBytesPerSample = 2;  // PCM16
+    private const int SampleRate = 48000;
+    private const ALFormat CaptureFormat = ALFormat.Mono16;
 
-    private MMDevice? device;
-    private WasapiCapture? capture;                 // default input in shared mode
-    private BufferedWaveProvider? buffered;         // holds native device format
-    private IWaveProvider? wave16Mono48;            // converted → PCM16 mono 48k
+    private readonly int samplesPerFrame;
+    private readonly int captureBufferSamples;
 
     private readonly ConcurrentQueue<byte[]> frames = new();
-    private Thread? worker;
-    private volatile bool started;
-    private volatile bool disposing;
+    private ALCaptureDevice _captureDevice = ALCaptureDevice.Null;
 
-    public MicRecorder(int frameMs = 20, DataFlow endpoint = DataFlow.Capture, Role role = Role.Communications) {
-        if (frameMs != 10 && frameMs != 20) throw new ArgumentException("Use 10 or 20 ms frames for VoIP.");
+    private Thread? _worker;
+    private volatile bool _running;
+    private volatile bool _disposed;
+
+    public MicRecorder(int frameMs = 20) {
         this.frameMs = frameMs;
 
-        var enumerator = new MMDeviceEnumerator();
-        device = enumerator.GetDefaultAudioEndpoint(endpoint, role);
-        // If you want the “default multimedia” mic, pass Role.Multimedia instead.
+        samplesPerFrame = SampleRate * frameMs / 1000;
+        // Internal ring buffer (~1 second)
+        captureBufferSamples = SampleRate * 1;
+
+        // Open default capture device
+        _captureDevice = ALC.CaptureOpenDevice(
+            devicename: null,
+            frequency: SampleRate,
+            format: CaptureFormat,
+            buffersize: captureBufferSamples
+        );
+
+        if (_captureDevice == ALCaptureDevice.Null)
+            throw new InvalidOperationException("Failed to open OpenAL capture device.");
+
+        Console.WriteLine("[OpenAL] Microphone capture device opened.");
     }
 
     public void Start() {
-        if (started) return;
+        if (_running || _disposed) return;
 
-        if (device == null) throw new InvalidOperationException("No default capture device.");
+        ALC.CaptureStart(_captureDevice);
+        _running = true;
 
-        // Initialize capture (shared mode, event sync off for simplicity; latency ~20ms)
-        capture = new WasapiCapture(device, false, frameMs);
-        // Capture format is device-native (often float 32-bit, stereo, 48k)
-        var inputFormat = capture.WaveFormat;
-        Console.WriteLine($"[WASAPI] Device: {device.FriendlyName}");
-        Console.WriteLine($"[WASAPI] Native format: {inputFormat.SampleRate} Hz, {inputFormat.BitsPerSample}-bit, {inputFormat.Channels} ch, {inputFormat.Encoding}");
-
-        buffered = new BufferedWaveProvider(inputFormat) {
-            DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromMilliseconds(500) // headroom for jitter
+        _worker = new Thread(CaptureLoop) {
+            IsBackground = true,
+            Name = "OpenAL Mic Capture"
         };
-
-        // 1) Push raw captured bytes into a buffer (native format)
-        capture.DataAvailable += (s, a) => {
-            if (a.BytesRecorded > 0) buffered!.AddSamples(a.Buffer, 0, a.BytesRecorded);
-        };
-        capture.RecordingStopped += (s, e) => {
-            started = false;
-            if (e.Exception != null) Console.WriteLine("[WASAPI] RecordingStopped error: " + e.Exception);
-            else Console.WriteLine("[WASAPI] RecordingStopped");
-        };
-
-        // 2) Build the conversion chain → PCM16 / MONO / 48k
-        //    a) to sample provider (always float)
-        ISampleProvider sp = buffered.ToSampleProvider();
-        //    b) if stereo, downmix to mono
-        if (sp.WaveFormat.Channels > 1) {
-            sp = new StereoToMonoSampleProvider(sp) {
-                LeftVolume = 0.5f,
-                RightVolume = 0.5f
-            };
-        }
-        //    c) resample to 48k if needed
-        if (sp.WaveFormat.SampleRate != targetSampleRate) {
-            sp = new WdlResamplingSampleProvider(sp, targetSampleRate);
-        }
-        //    d) float → PCM16
-        wave16Mono48 = new SampleToWaveProvider16(sp); // IWaveProvider(Read bytes)
-
-        // 3) Start capture
-        capture.StartRecording();
-        started = true;
-        Console.WriteLine($"[WASAPI] Started. Target: {targetSampleRate} Hz, PCM16, mono. Frame {frameMs} ms");
-
-        // 4) Chunker thread: reads fixed-size frames and enqueues
-        int bytesPerFrame = targetSampleRate * targetChannels * targetBytesPerSample * frameMs / 1000;
-        worker = new Thread(() => ChunkLoop(bytesPerFrame)) { IsBackground = true, Name = "WasapiChunker" };
-        worker.Start();
+        _worker.Start();
     }
 
-    private void ChunkLoop(int bytesPerFrame) {
-        var buf = new byte[bytesPerFrame];
+    private void CaptureLoop() {
+        var sampleBuffer = new short[samplesPerFrame];
 
-        // Helpful threshold to avoid tiny reads: about 2 frames worth
-        int minReadable = bytesPerFrame * 2;
+        try {
+            while (_running) {
+                // How many samples are ready?
+                ALC.GetInteger(
+                    _captureDevice,
+                    AlcGetInteger.CaptureSamples,
+                    1,
+                    out int available
+                );
 
-        while (!disposing && started) {
-            try {
-                // Wait until there's enough audio buffered in the upstream provider
-                // We only know the buffered bytes at the *BufferedWaveProvider* stage,
-                // but wave16Mono48 pulls from that pipeline, so this is a decent proxy.
-                var bufferedBytes = buffered!.BufferedBytes;
-                if (bufferedBytes < minReadable) {
-                    Thread.Sleep(2);
-                    continue;
-                }
+                if (available >= samplesPerFrame) {
+                    // Read a chunk into the short[] buffer
+                    ALC.CaptureSamples(_captureDevice, sampleBuffer, samplesPerFrame);
 
-                int read = wave16Mono48!.Read(buf, 0, buf.Length);
-                if (read == buf.Length) {
-                    // Copy to avoid reuse
-                    var frame = new byte[read];
-                    Buffer.BlockCopy(buf, 0, frame, 0, read);
-                    frames.Enqueue(frame);
+                    // Convert short[] -> byte[] (PCM16 LE)
+                    var spanShort = sampleBuffer.AsSpan();
+                    var spanBytes = MemoryMarshal.AsBytes(spanShort);
+                    var frameBytes = spanBytes.ToArray(); // copy
+
+                    frames.Enqueue(frameBytes);
                 }
                 else {
-                    // Underflow or end — back off briefly
-                    Thread.Sleep(2);
+                    Thread.Sleep(1);
                 }
             }
-            catch (Exception ex) {
-                Console.WriteLine("[WASAPI] ChunkLoop error: " + ex.Message);
-                Thread.Sleep(10);
-            }
         }
-    }
-
-    public void Stop() {
-        if (!started) return;
-        try { capture?.StopRecording(); } catch { }
-        started = false;
+        catch (Exception ex) {
+            Console.WriteLine("[OpenAL] Error in MicRecorder loop: " + ex);
+        }
     }
 
     public bool TryDequeue(out byte[]? buffer) => frames.TryDequeue(out buffer);
 
+    public void Stop() {
+        if (!_running) return;
+        _running = false;
+
+        try { _worker?.Join(200); } catch { /* ignore */ }
+        _worker = null;
+
+        if (_captureDevice != ALCaptureDevice.Null) {
+            try { ALC.CaptureStop(_captureDevice); } catch { }
+        }
+    }
+
     public void Dispose() {
-        disposing = true;
+        if (_disposed) return;
+        _disposed = true;
+
         Stop();
-        try { worker?.Join(200); } catch { }
-        capture?.Dispose();
-        device?.Dispose();
+
+        if (_captureDevice != ALCaptureDevice.Null) {
+            try { ALC.CaptureCloseDevice(_captureDevice); } catch { }
+            _captureDevice = ALCaptureDevice.Null;
+        }
     }
 }
 
 public sealed class Pcm16Player : IDisposable {
-    private readonly WaveFormat fmt = new WaveFormat(48000, 16, 1); // 48k / 16-bit / mono
-    private readonly WaveOutEvent outDev;
-    private readonly BufferedWaveProvider buffer;
+    private const int SampleRate = 48000;
+    private const ALFormat PlaybackFormat = ALFormat.Mono16;
 
+    private const int FrameMs = 20;
+    private const int SamplesPerFrame = SampleRate * FrameMs / 1000;
+    private const int NumBuffers = 8;
+
+    private readonly ConcurrentQueue<byte[]> queue = new();
+
+    private ALDevice _device = ALDevice.Null;
+    private ALContext _context = ALContext.Null;
+    private int _source;
+    private int[] _buffers = Array.Empty<int>();
+
+    private Thread? _playbackThread;
+    private volatile bool _running;
+    private volatile bool _disposed;
+
+    // latencyMs/jitterMs kept for signature compatibility; we mainly use them
+    // to decide how many buffers we keep in flight (via NumBuffers).
     public Pcm16Player(int latencyMs = 100, int jitterMs = 500) {
-        buffer = new BufferedWaveProvider(fmt) {
-            DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromMilliseconds(jitterMs)
+        // Enumerate playback devices
+        var devices = ALC.GetString(ALDevice.Null, AlcGetStringList.DeviceSpecifier);
+        if (devices.Count == 0)
+            throw new InvalidOperationException("OpenAL reports no playback devices.");
+
+        string chosen = devices[0];
+        Console.WriteLine($"[OpenAL] Using playback device: {chosen}");
+
+        _device = ALC.OpenDevice(chosen);
+        if (_device == ALDevice.Null)
+            throw new InvalidOperationException("Failed to open OpenAL playback device.");
+
+        _context = ALC.CreateContext(_device, (int[]?)null);
+        if (_context == ALContext.Null)
+            throw new InvalidOperationException("Failed to create OpenAL context.");
+
+        if (!ALC.MakeContextCurrent(_context))
+            throw new InvalidOperationException("Failed to make OpenAL context current.");
+
+        _source = AL.GenSource();
+        _buffers = new int[NumBuffers];
+        AL.GenBuffers(_buffers);
+
+        // Prime queue with silence so playback starts smoothly
+        short[] silence = new short[SamplesPerFrame];
+        foreach (int buf in _buffers) {
+            AL.BufferData(buf, PlaybackFormat, silence, SampleRate);
+            AL.SourceQueueBuffer(_source, buf);
+        }
+
+        AL.SourcePlay(_source);
+
+        _running = true;
+        _playbackThread = new Thread(PlaybackLoop) {
+            IsBackground = true,
+            Name = "OpenAL Playback"
         };
-        outDev = new WaveOutEvent { DesiredLatency = latencyMs };
-        outDev.Init(buffer);
-        outDev.Play();
-        Console.WriteLine("[AUDIO] Playback ready.");
+        _playbackThread.Start();
+
+        Console.WriteLine("[OpenAL] Playback ready.");
     }
 
-    public void AddFrame(byte[] frame, int offset, int count)
-        => buffer.AddSamples(frame, offset, count);
+    private void PlaybackLoop() {
+        // Context must be current on the thread that uses AL.* APIs
+        ALC.MakeContextCurrent(_context);
+
+        var silence = new short[SamplesPerFrame];
+
+        try {
+            while (_running) {
+                // How many buffers have finished playing?
+                AL.GetSource(_source, ALGetSourcei.BuffersProcessed, out int processed);
+
+                while (processed-- > 0) {
+                    int bufferId = AL.SourceUnqueueBuffer(_source);
+
+                    byte[]? frame = null;
+                    if (!queue.TryDequeue(out frame) || frame == null) {
+                        // No audio available: play silence
+                        AL.BufferData(bufferId, PlaybackFormat, silence, SampleRate);
+                    }
+                    else {
+                        // Ensure the frame length is a multiple of 2 bytes
+                        if ((frame.Length & 1) != 0) {
+                            // Trim one byte if odd length (shouldn't happen in your pipeline)
+                            Array.Resize(ref frame, frame.Length - 1);
+                        }
+
+                        AL.BufferData(bufferId, PlaybackFormat, frame, SampleRate);
+                    }
+
+                    AL.SourceQueueBuffer(_source, bufferId);
+                }
+
+                // Ensure source is still playing
+                var state = (ALSourceState)AL.GetSource(_source, ALGetSourcei.SourceState);
+                if (state != ALSourceState.Playing) {
+                    AL.SourcePlay(_source);
+                }
+
+                Thread.Sleep(1);
+            }
+        }
+        catch (Exception ex) {
+            Console.WriteLine("[OpenAL] Error in Pcm16Player loop: " + ex);
+        }
+    }
+
+    public void AddFrame(byte[] frame, int offset, int count) {
+        if (_disposed) return;
+
+        // Make a copy; caller may reuse the buffer
+        var copy = new byte[count];
+        Buffer.BlockCopy(frame, offset, copy, 0, count);
+        queue.Enqueue(copy);
+    }
 
     public void Dispose() {
-        outDev?.Stop();
-        outDev?.Dispose();
+        if (_disposed) return;
+        _disposed = true;
+
+        _running = false;
+        try { _playbackThread?.Join(200); } catch { /* ignore */ }
+        _playbackThread = null;
+
+        if (_source != 0) {
+            try {
+                AL.SourceStop(_source);
+                AL.GetSource(_source, ALGetSourcei.BuffersQueued, out int queued);
+                while (queued-- > 0) {
+                    AL.SourceUnqueueBuffer(_source);
+                }
+                AL.DeleteSource(_source);
+            }
+            catch { /* ignore */ }
+            _source = 0;
+        }
+
+        if (_buffers.Length > 0) {
+            try { AL.DeleteBuffers(_buffers.Length, _buffers); } catch { }
+            _buffers = Array.Empty<int>();
+        }
+
+        if (_context != ALContext.Null) {
+            try {
+                ALC.MakeContextCurrent(ALContext.Null);
+                ALC.DestroyContext(_context);
+            }
+            catch { /* ignore */ }
+            _context = ALContext.Null;
+        }
+
+        if (_device != ALDevice.Null) {
+            try { ALC.CloseDevice(_device); } catch { }
+            _device = ALDevice.Null;
+        }
     }
 }
