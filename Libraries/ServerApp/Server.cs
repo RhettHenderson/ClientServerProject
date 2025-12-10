@@ -784,7 +784,8 @@ public class Server : IAsyncDisposable {
             }
         }
         catch (FileNotFoundException) {
-            Notification?.Invoke(NotificationType.Warning, "Password file not found. Users cannot connect until one is made. \nRun --create <name> <password> to create the file and the first user.");
+            Notification?.Invoke(NotificationType.Warning, "Password file not found. Users cannot connect until one is made. " +
+                "\nRun --create <name> <password> to create the file and the first user.");
         }
         catch (Exception e) {
             Notification?.Invoke(NotificationType.Error, $"Unexepected exception: {e.Message}");
@@ -881,29 +882,6 @@ public class Server : IAsyncDisposable {
             ?? throw new InvalidOperationException("Certificate with specified thumbprint not found.");
         }
         return cert;
-    }
-
-
-    // === Server Console Handling ===
-    private async Task RunServerConsoleAsync() {
-        while (true) {
-            string? line = Console.ReadLine();
-            if (line is null) break;
-            if (string.IsNullOrEmpty(line)) continue;
-            if (line.StartsWith("--")) {
-                //Pass the command minus the '--' to the handler
-                await HandleServerCommandAsync(line[2..]);
-                try {
-                    await HandleServerCommandAsync(line.Trim());
-                }
-                catch (Exception ex) {
-                    Notification?.Invoke(NotificationType.Info, $"Error processing command: {ex.Message}");
-                }
-            }
-            else {
-                await SendMessageAsync(line);
-            }
-        }
     }
 
     public async Task SendMessageAsync(string message) {
@@ -1012,15 +990,5 @@ public class Server : IAsyncDisposable {
     public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
         StopServerMicrophone();
-    }
-
-    static short MaxAbsPcm16(ReadOnlySpan<byte> buf) {
-        short max = 0;
-        for (int i = 0; i + 1 < buf.Length; i += 2) {
-            short s = (short)(buf[i] | (buf[i + 1] << 8)); // little-endian
-            short a = (short)Math.Abs(s);
-            if (a > max) max = a;
-        }
-        return max;
     }
 }
