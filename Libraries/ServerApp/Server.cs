@@ -1,6 +1,4 @@
 using Common;
-using Concentus.Enums;
-using Concentus.Structs;
 using NAudio.Wave;
 using Syroot.Windows.IO;
 using System.Collections.Concurrent;
@@ -76,8 +74,6 @@ public class Server : IAsyncDisposable {
     private MicRecorder? _mic;
     private Thread? micSenderThread;
     private bool disableServerMic;
-    private OpusDecoder? _opusDecoder;
-    private readonly short[] decodeBuffer = new short[1920];
 
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -177,15 +173,7 @@ public class Server : IAsyncDisposable {
 
                 if (voiceParticipants.ContainsKey(0) && serverPlatform == "Windows") {
                     EnsureServerPlayer();
-
-                    var fmt = packet.Headers.TryGetValue("Fmt", out var f) ? f : string.Empty;
-                    if (fmt == "Opus_48k_Mono") {
-                        var pcm = DecodeOpus(packet.Payload);
-                        _player?.AddFrame(pcm, 0, pcm.Length);
-                    }
-                    else {
-                        _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
-                    }
+                    _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
                 }
             }
             catch (ObjectDisposedException) {
@@ -248,16 +236,9 @@ public class Server : IAsyncDisposable {
             const int bytesPerSample = 2;
             const int samplesPer10ms = 480;
             const int maxFrameBytes = samplesPer10ms * bytesPerSample;
-            const int targetSampleRate = 48000;
-            const int targetChannels = 1;
 
             uint seq = 0;
             int timestampSamples = 0;
-
-            var encoder = OpusEncoder.Create(targetSampleRate, targetChannels, OpusApplication.OPUS_APPLICATION_VOIP);
-            encoder.Bitrate = 64000;
-            var pcmBuffer = new short[samplesPer10ms];
-            var encodedBuffer = new byte[1275];
 
             while (_mic != null && udp != null && !disableServerMic) {
                 if (!_mic.TryDequeue(out var frame) || frame is null) {
@@ -268,16 +249,8 @@ public class Server : IAsyncDisposable {
                 int offset = 0;
                 while (offset < frame.Length) {
                     int take = Math.Min(maxFrameBytes, frame.Length - offset);
-                    int samples = take / bytesPerSample;
-
-                    if (samples > pcmBuffer.Length) {
-                        Array.Resize(ref pcmBuffer, samples);
-                    }
-
-                    Buffer.BlockCopy(frame, offset, pcmBuffer, 0, take);
-                    int encodedLength = encoder.Encode(pcmBuffer, 0, samples, encodedBuffer, 0, encodedBuffer.Length);
-                    var payload = new byte[encodedLength];
-                    Buffer.BlockCopy(encodedBuffer, 0, payload, 0, encodedLength);
+                    var slice = new byte[take];
+                    Buffer.BlockCopy(frame, offset, slice, 0, take);
 
                     var packet = new Packet {
                         ClientID = Name,
@@ -287,9 +260,9 @@ public class Server : IAsyncDisposable {
                             { "Protocol", "UDP" },
                             { "Seq", seq.ToString() },
                             { "Ts", timestampSamples.ToString() },
-                            { "Fmt", "Opus_48k_Mono" }
+                            { "Fmt", "PCM16_48k_Mono" }
                         },
-                        Payload = payload
+                        Payload = slice
                     };
 
                     var endpoints = udpClients
@@ -302,7 +275,7 @@ public class Server : IAsyncDisposable {
                     }
 
                     seq++;
-                    timestampSamples += samples;
+                    timestampSamples += take / bytesPerSample;
                     offset += take;
                 }
             }
@@ -326,22 +299,6 @@ public class Server : IAsyncDisposable {
         }
 
         _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
-    }
-
-    private byte[] DecodeOpus(byte[] data) {
-        EnsureDecoder();
-
-        var decoder = _opusDecoder!;
-        int samplesDecoded = decoder.Decode(data, 0, data.Length, decodeBuffer, 0, decodeBuffer.Length, false);
-        var pcmBytes = new byte[samplesDecoded * 2];
-        Buffer.BlockCopy(decodeBuffer, 0, pcmBytes, 0, pcmBytes.Length);
-        return pcmBytes;
-    }
-
-    private void EnsureDecoder() {
-        if (_opusDecoder == null) {
-            _opusDecoder = OpusDecoder.Create(48000, 1);
-        }
     }
 
     private void CloseUdpConnection() {
