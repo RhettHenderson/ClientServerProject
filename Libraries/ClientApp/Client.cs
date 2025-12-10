@@ -1,4 +1,6 @@
 using Common;
+using Concentus.Enums;
+using Concentus.Structs;
 using Syroot.Windows.IO;
 using System.Collections.Concurrent;
 using System.Net;
@@ -19,6 +21,8 @@ public class Client : IAsyncDisposable {
 
     // === Microphone Fields ===
     private Pcm16Player? _player;
+    private OpusDecoder? _opusDecoder;
+    private readonly short[] decodeBuffer = new short[1920]; // Up to 40 ms @ 48k mono
 
     // === Instance Fields ===
     private int id = -1;
@@ -245,9 +249,19 @@ public class Client : IAsyncDisposable {
                         if (packet.ClientID == Name) {
                             continue; // Ignore our own audio packets
                         }
+
+                        var fmt = packet.Headers.TryGetValue("Fmt", out var f) ? f : string.Empty;
+
                         if (PlatformName == "Windows") {
                             EnsurePlayer();
-                            _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
+
+                            if (fmt == "Opus_48k_Mono") {
+                                var pcm = DecodeOpus(packet.Payload);
+                                _player?.AddFrame(pcm, 0, pcm.Length);
+                            }
+                            else {
+                                _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                            }
                         }
                         else if (!playbackWarningSent) {
                             playbackWarningSent = true;
@@ -412,8 +426,15 @@ public class Client : IAsyncDisposable {
         const int bytesPerSample = 2;
         const int samplesPer10ms = 480;
         const int maxFrameBytes = samplesPer10ms * bytesPerSample;
+        const int targetSampleRate = 48000;
+        const int targetChannels = 1;
 
         var senderThread = new Thread(() => {
+            var encoder = OpusEncoder.Create(targetSampleRate, targetChannels, OpusApplication.OPUS_APPLICATION_VOIP);
+            encoder.Bitrate = 64000;
+            var pcmBuffer = new short[samplesPer10ms];
+            var encodedBuffer = new byte[1275];
+
             while (true) {
                 if (!rec.TryDequeue(out var frame) || frame is null) {
                     Thread.Sleep(1);
@@ -424,8 +445,17 @@ public class Client : IAsyncDisposable {
                 int offset = 0;
                 while (offset < frame.Length) {
                     int take = Math.Min(maxFrameBytes, frame.Length - offset);
-                    var slice = new byte[take];
-                    Buffer.BlockCopy(frame, offset, slice, 0, take);
+                    int samples = take / bytesPerSample;
+
+                    if (samples > pcmBuffer.Length) {
+                        Array.Resize(ref pcmBuffer, samples);
+                    }
+
+                    Buffer.BlockCopy(frame, offset, pcmBuffer, 0, take);
+                    int encodedLength = encoder.Encode(pcmBuffer, 0, samples, encodedBuffer, 0, encodedBuffer.Length);
+
+                    var payload = new byte[encodedLength];
+                    Buffer.BlockCopy(encodedBuffer, 0, payload, 0, encodedLength);
 
                     // 3) Add minimal sequencing metadata (headers) for VoIP
                     var audio = new Packet {
@@ -436,15 +466,15 @@ public class Client : IAsyncDisposable {
                             { "Protocol", "UDP" },
                             { "Seq", seq.ToString() },
                             { "Ts",  timestampSamples.ToString() }, // samples @ 48k
-                            { "Fmt", "PCM16_48k_Mono" }
+                            { "Fmt", "Opus_48k_Mono" }
                         },
-                        Payload = slice
+                        Payload = payload
                     };
                     PacketIO.SendPacketToAsyncUdp(udp, audio, remote);
 
                     // advance counters
                     seq++;
-                    timestampSamples += take / bytesPerSample;
+                    timestampSamples += samples;
 
                     offset += take;
                 }
@@ -465,5 +495,21 @@ public class Client : IAsyncDisposable {
         }
 
         _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
+    }
+
+    private byte[] DecodeOpus(byte[] data) {
+        EnsureDecoder();
+
+        var decoder = _opusDecoder!;
+        int samplesDecoded = decoder.Decode(data, 0, data.Length, decodeBuffer, 0, decodeBuffer.Length, false);
+        var pcmBytes = new byte[samplesDecoded * 2];
+        Buffer.BlockCopy(decodeBuffer, 0, pcmBytes, 0, pcmBytes.Length);
+        return pcmBytes;
+    }
+
+    private void EnsureDecoder() {
+        if (_opusDecoder == null) {
+            _opusDecoder = OpusDecoder.Create(48000, 1);
+        }
     }
 }
