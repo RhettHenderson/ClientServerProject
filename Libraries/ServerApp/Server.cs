@@ -1,4 +1,6 @@
 using Common;
+using static Common.Utility;
+using Common.Audio;
 using Syroot.Windows.IO;
 using System.Collections.Concurrent;
 using System.Net;
@@ -17,7 +19,7 @@ public class Server : IAsyncDisposable {
     private static string Name = "Server";
 
     // === Connection Handling ===
-    private sealed class Conn {
+    internal sealed class Conn {
         public Socket socket { get; }
         public Stream io { get; }
 
@@ -30,14 +32,9 @@ public class Server : IAsyncDisposable {
     // === Active Clients & State ===
     private static readonly ConcurrentDictionary<int, Conn> clients = new();               // ID -> connection
     private static readonly ConcurrentDictionary<string, int> names = new();               // username -> ID
-    private static readonly ConcurrentDictionary<int, (float, float, float)> positions = new(); // ID -> position
     private static readonly ConcurrentDictionary<string, FileReceiveState> files = new();  // fileKey -> state
     private static readonly ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new(); // expectedType -> TaskCompletionSource
-
-    // === Authentication ===
-    private static ConcurrentDictionary<string, string> passwords = new();        // username -> password hash
-    private static int currentAuthCode = 111111;
-    private static string passwordsFile = "passwords.txt";
+    internal readonly ConcurrentDictionary<int, string> clientPlatforms = new(); // ID -> platform name
 
     // === File I/O ===
     private static Stream _stream = null;
@@ -49,55 +46,36 @@ public class Server : IAsyncDisposable {
     private static readonly byte[] cmdJson = JsonSerializer.SerializeToUtf8Bytes(commands, CommonJsonContext.Default.StringArray);
     public IPAddress? listeningIp { get; private set; }
     public int listeningPort { get; private set; }
-    private Socket? udp;
-    private readonly object udpLock = new();
-    private int? pendingVoiceClientId;
-    private CancellationTokenSource? voiceInviteCts;
-    private readonly ConcurrentDictionary<int, IPEndPoint> udpClients = new();
-    private readonly ConcurrentDictionary<int, string> clientPlatforms = new();
-    private readonly ConcurrentDictionary<int, byte> voiceParticipants = new();
-    private readonly string serverPlatform = Utility.GetPlatformName();
+
+    private ServerAuth auth;
+    private VoiceChatManager vc;
 
     // === Events and Actions ===
-    public event Action<string, string>? MessageReceived;   // (from, text)
     public event Action<string, string>? WhisperReceived;   // (from, text)
-    public event Action<string[]>? CommandsReceived;
-    public event Action<int>? IdAssigned;
-    public event Action? Disconnected;
     public event Action<string>? Error;
     public event Action<NotificationType, string>? Notification;
+    public event Action<string, string> MessageReceived;    // (from, text)
 
-    // === Audio Playback ===
-    private static Pcm16Player? _player;
-    private MicRecorder? _mic;
-    private Thread? micSenderThread;
-    private bool disableServerMic;
-
-    //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-    // === Main Server Loop ===
-    public async Task ExecuteServerAsync(int port) {
-        string ip = Utility.GetLocalIP();
+    public void Initialize(int port) {
         listeningPort = port;
         Console.Title = "Server";
+        this.vc = new VoiceChatManager(listeningIp, listeningPort, names, clients, Notification, Name);
+        this.auth = new ServerAuth(Notification, names, clients, this.vc, clientPlatforms);
         try {
             defaultSaveDir = KnownFolders.Downloads.Path;
         }
         catch (Exception e) {
             defaultSaveDir = "/downloads";
         }
-        await InitListener(ip);
-
-        //var acceptTask = AcceptLoopAsync();
-        //var consoleTask = Task.Run(() => RunServerConsoleAsync());
-
-        //await Task.WhenAny(acceptTask, consoleTask);
-        await AcceptLoopAsync();
-
-        //try { await Task.WhenAll(acceptTask, consoleTask); } catch { }
+        InitListener(GetLocalIP());
     }
-    public async Task InitListener(string ip) {
-        await ReadPasswords(passwordsFile);
+
+    // === Main Server Loop ===
+    public async Task Start() {
+        await AcceptLoopAsync();
+    }
+    public void InitListener(string ip) {
+        auth.Load();
         IPAddress ipAddr;
         if (ip == "") {
             ipAddr = IPAddress.Loopback; //127.0.0.1
@@ -135,189 +113,6 @@ public class Server : IAsyncDisposable {
         }
     }
 
-    private void StartUdpListenerIfNeeded() {
-        if (udp != null || listeningIp is null) {
-            return;
-        }
-
-        udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        udp.Bind(new IPEndPoint(listeningIp, listeningPort));
-        _ = Task.Run(() => UdpReceiveLoopAsync(udp));
-    }
-
-    public async Task UdpReceiveLoopAsync(Socket udp) {
-        MessageReceived?.Invoke("UDP Listener", "Started UDP receive loop.");
-        var buf = new byte[4096];
-        EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
-
-        while (true) {
-            try {
-                var result = await udp.ReceiveFromAsync(buf, SocketFlags.None, remote);
-                Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
-                var from = (IPEndPoint)result.RemoteEndPoint;
-
-                var senderId = ResolveClientId(packet.ClientID);
-                if (senderId >= 0) {
-                    udpClients[senderId] = from;
-                }
-
-                if (!packet.Headers.TryGetValue("Type", out var type) || type != "Audio") {
-                    Notification?.Invoke(NotificationType.Info, $"Ignoring non-audio UDP packet from {from}");
-                    continue;
-                }
-
-                if (senderId >= 0 && voiceParticipants.ContainsKey(senderId)) {
-                    await ForwardAudioAsync(udp, senderId, packet);
-                }
-
-                if (voiceParticipants.ContainsKey(0) && serverPlatform == "Windows") {
-                    EnsureServerPlayer();
-                    _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
-                }
-            }
-            catch (ObjectDisposedException) {
-                Notification?.Invoke(NotificationType.Info, "UDP listener stopped.");
-                break;
-            }
-            catch (SocketException) {
-                Notification?.Invoke(NotificationType.Info, "UDP listener stopped due to socket closure.");
-                break;
-            }
-        }
-    }
-
-    public async Task UdpSendAsync(Socket udp, string ip, int port, string message) {
-        IPAddress ipAddr = IPAddress.Parse(ip);
-        IPEndPoint remoteEndPoint = new IPEndPoint(ipAddr, port);
-        var buf = Encoding.UTF8.GetBytes(message);
-        await udp.SendToAsync(buf, SocketFlags.None, remoteEndPoint);
-    }
-
-    private int ResolveClientId(string clientId) {
-        if (string.Equals(clientId, Name, StringComparison.OrdinalIgnoreCase)) {
-            return 0;
-        }
-
-        if (names.TryGetValue(clientId, out var id)) {
-            return id;
-        }
-
-        return -1;
-    }
-
-    private async Task ForwardAudioAsync(Socket udp, int senderId, Packet packet) {
-        var recipients = udpClients
-            .Where(kv => kv.Key != senderId && voiceParticipants.ContainsKey(kv.Key))
-            .Select(kv => kv.Value)
-            .ToArray();
-
-        foreach (var endpoint in recipients) {
-            await PacketIO.SendPacketToAsyncUdp(udp, packet, endpoint);
-        }
-    }
-
-    private void StartServerMicrophone() {
-        if (disableServerMic || udp is null || _mic != null || serverPlatform != "Windows") {
-            return;
-        }
-
-        try {
-            _mic = new MicRecorder(frameMs: 10);
-            _mic.Start();
-        }
-        catch (Exception ex) {
-            Notification?.Invoke(NotificationType.Warning, $"Unable to start server microphone: {ex.Message}");
-            _mic = null;
-            return;
-        }
-
-        micSenderThread = new Thread(() => {
-            const int bytesPerSample = 2;
-            const int samplesPer10ms = 480;
-            const int maxFrameBytes = samplesPer10ms * bytesPerSample;
-
-            uint seq = 0;
-            int timestampSamples = 0;
-
-            while (_mic != null && udp != null && !disableServerMic) {
-                if (!_mic.TryDequeue(out var frame) || frame is null) {
-                    Thread.Sleep(1);
-                    continue;
-                }
-
-                int offset = 0;
-                while (offset < frame.Length) {
-                    int take = Math.Min(maxFrameBytes, frame.Length - offset);
-                    var slice = new byte[take];
-                    Buffer.BlockCopy(frame, offset, slice, 0, take);
-
-                    var packet = new Packet {
-                        ClientID = Name,
-                        Headers = new Dictionary<string, string>
-                        {
-                            { "Type", "Audio" },
-                            { "Protocol", "UDP" },
-                            { "Seq", seq.ToString() },
-                            { "Ts", timestampSamples.ToString() },
-                            { "Fmt", "PCM16_48k_Mono" }
-                        },
-                        Payload = slice
-                    };
-
-                    var endpoints = udpClients
-                        .Where(kv => voiceParticipants.ContainsKey(kv.Key))
-                        .Select(kv => kv.Value)
-                        .ToArray();
-
-                    foreach (var endpoint in endpoints) {
-                        PacketIO.SendPacketToAsyncUdp(udp, packet, endpoint);
-                    }
-
-                    seq++;
-                    timestampSamples += take / bytesPerSample;
-                    offset += take;
-                }
-            }
-        }) { IsBackground = true, Name = "ServerMicSender" };
-
-        micSenderThread.Start();
-        Notification?.Invoke(NotificationType.Info, "Server microphone capture started.");
-    }
-
-    private void StopServerMicrophone() {
-        disableServerMic = false;
-        _mic?.Dispose();
-        _mic = null;
-        try { micSenderThread?.Join(200); } catch { }
-        micSenderThread = null;
-    }
-
-    private void EnsureServerPlayer() {
-        if (_player != null || serverPlatform != "Windows") {
-            return;
-        }
-
-        _player = new Pcm16Player(latencyMs: 100, jitterMs: 600);
-    }
-
-    private void CloseUdpConnection() {
-        Socket? socketToClose = null;
-        lock (udpLock) {
-            if (udp != null) {
-                socketToClose = udp;
-                udp = null;
-            }
-        }
-
-        if (socketToClose != null) {
-            StopServerMicrophone();
-            try { socketToClose.Close(); } catch { }
-            Notification?.Invoke(NotificationType.Info, "Closed local UDP connection.");
-        }
-
-        udpClients.Clear();
-        voiceParticipants.Clear();
-    }
     public async Task<int> WaitForConnectionAsync() {
         Notification?.Invoke(NotificationType.Info, "Waiting for connection...");
         Socket client = await listener.AcceptAsync();
@@ -383,12 +178,12 @@ public class Server : IAsyncDisposable {
         }
         if (status == PacketStatus.Disconnected) {
             Notification?.Invoke(NotificationType.Warning, $"Client {id} forcibly disconnected");
-            RemoveClient(id);
+            auth.RemoveClient(id);
             return false;
         }
         else if (status == PacketStatus.Error) {
             Error?.Invoke("An error occured trying to receive the last packet. Closing connection.");
-            RemoveClient(id);
+            auth.RemoveClient(id);
             return false;
         }
         //if we reach here status is Ok
@@ -414,7 +209,7 @@ public class Server : IAsyncDisposable {
 
         switch (type) {
             case ("Message"):
-                Notification?.Invoke(NotificationType.Info, $"{clientID} sent chat {text}");
+                MessageReceived?.Invoke(clientID, text);
                 await BroadcastAsync(incoming, id);
                 return true;
             case ("Command"):
@@ -486,49 +281,49 @@ public class Server : IAsyncDisposable {
                 bool includeServer = false;
 
                 if (requestedTargets.Length == 0) {
-                    includeServer = serverPlatform == "Windows";
+                    includeServer = vc.serverPlatform == "Windows";
                     if (!includeServer) {
-                        await SendVoiceInviteWarningAsync(id, "Server cannot join voice on this platform.");
+                        await vc.SendVoiceInviteWarningAsync(id, "Server cannot join voice on this platform.");
                     }
                 }
 
                 foreach (var target in requestedTargets) {
                     if (string.Equals(target, Name, StringComparison.OrdinalIgnoreCase)) {
-                        if (serverPlatform == "Windows") {
+                        if (vc.serverPlatform == "Windows") {
                             includeServer = true;
                         }
                         else {
-                            await SendVoiceInviteWarningAsync(id, "Server cannot join voice on this platform.");
+                            await vc.SendVoiceInviteWarningAsync(id, "Server cannot join voice on this platform.");
                         }
                         continue;
                     }
 
                     if (!names.TryGetValue(target, out var targetId)) {
-                        await SendVoiceInviteWarningAsync(id, $"Client '{target}' is not connected.");
+                        await vc.SendVoiceInviteWarningAsync(id, $"Client '{target}' is not connected.");
                         continue;
                     }
 
                     if (clientPlatforms.TryGetValue(targetId, out var platformName) && platformName != "Windows") {
-                        await SendVoiceInviteWarningAsync(id, $"{target} is on {platformName} and cannot join voice chat.");
+                        await vc.SendVoiceInviteWarningAsync(id, $"{target} is on {platformName} and cannot join voice chat.");
                         continue;
                     }
 
                     participants.Add(targetId);
                 }
 
-                voiceParticipants.Clear();
+                vc.voiceParticipants.Clear();
                 foreach (var participantId in participants) {
-                    voiceParticipants[participantId] = 1;
+                    vc.voiceParticipants[participantId] = 1;
                 }
 
                 if (includeServer) {
-                    voiceParticipants[0] = 1;
+                    vc.voiceParticipants[0] = 1;
                 }
 
-                if (voiceParticipants.Count == 1) {
+                if (vc.voiceParticipants.Count == 1) {
                     Notification?.Invoke(NotificationType.Warning, $"{clientID} tried to make a voice room with only themselves. Rejecting.");
-                    await SendVoiceInviteWarningAsync(id, "You can't make a voice room with just yourself.");
-                    voiceParticipants.Clear();
+                    await vc.SendVoiceInviteWarningAsync(id, "You can't make a voice room with just yourself.");
+                    vc.voiceParticipants.Clear();
                     return true;
                 }
 
@@ -543,14 +338,14 @@ public class Server : IAsyncDisposable {
                     }
                 }
 
-                StartUdpListenerIfNeeded();
-                if (includeServer && serverPlatform == "Windows") {
-                    disableServerMic = clients.TryGetValue(id, out var inviterConn) && IsSameMachine(inviterConn.socket);
-                    if (disableServerMic) {
+                vc.StartUdpListenerIfNeeded();
+                if (includeServer && vc.serverPlatform == "Windows") {
+                    vc.disableServerMic = clients.TryGetValue(id, out var inviterConn) && IsSameMachine(inviterConn.socket);
+                    if (vc.disableServerMic) {
                         Notification?.Invoke(NotificationType.Info, "Client is local; server microphone disabled.");
                     }
                     else {
-                        StartServerMicrophone();
+                        vc.StartServerMicrophone();
                     }
                 }
 
@@ -564,40 +359,34 @@ public class Server : IAsyncDisposable {
                     clientPlatforms[id] = platform;
                 }
                 return true;
-            case "Pos":
-                //Position update packet
-                positions[id] = PositionCodec.Decode(incoming.Payload);
-                //Just broadcast it to everyone else
-                await BroadcastAsync(incoming, id);
-                return true;
             case "Auth":
                 //Authentication packet containing the client's password
-                switch (await AuthenticateClient(clientID, text, id)) {
-                    case AuthenticationStatus.Success:
+                switch (await auth.AuthenticateClient(clientID, text, id)) {
+                    case ServerAuth.AuthenticationStatus.Success:
                         Notification?.Invoke(NotificationType.Info, $"Client {id} authenticated successfully as {clientID}.");
                         names[clientID] = id;
                         await SendInitialPackets(conn.io, id);
                         return true;
-                    case AuthenticationStatus.WrongPassword:
+                    case ServerAuth.AuthenticationStatus.WrongPassword:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} used the wrong password. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
                         reply.Payload = Encoding.UTF8.GetBytes("Incorrect password.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        RemoveClient(id);
+                        auth.RemoveClient(id);
                         return false;
-                    case AuthenticationStatus.WrongUsername:
+                    case ServerAuth.AuthenticationStatus.WrongUsername:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} tried to login as non-existent user {clientID}. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
                         reply.Payload = Encoding.UTF8.GetBytes("No account with that username exists.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        RemoveClient(id);
+                        auth.RemoveClient(id);
                         return false;
-                    case AuthenticationStatus.AlreadyLoggedIn:
+                    case ServerAuth.AuthenticationStatus.AlreadyLoggedIn:
                         Notification?.Invoke(NotificationType.Warning, $"User {clientID} is already logged in. Rejecting client {id}.");
                         reply.Headers["Type"] = "AuthFailure";
                         reply.Payload = Encoding.UTF8.GetBytes("Another user is already logged in with that account.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        RemoveClient(id);
+                        auth.RemoveClient(id);
                         return false;
                     default:
                         break;
@@ -605,67 +394,29 @@ public class Server : IAsyncDisposable {
                 break;
             case "AuthCodeRequest":
                 //Passes a pointer so our global variable gets updated
-                Utility.GenerateAuthCode(ref currentAuthCode);
-                Notification?.Invoke(NotificationType.Info, $"Authentication Code: {currentAuthCode}");
+                await auth.ShowAuthCode();
                 return true;
             case "AuthCode":
                 int code = 0;
-                if (int.TryParse(text, out code)) {
-                    if (code == currentAuthCode) {
-                        Notification?.Invoke(NotificationType.Info, $"Client {id} sent correct auth code {text}.");
-                        reply.Headers["Type"] = "AuthStatus";
-                        reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Success.ToString());
-                        await PacketIO.SendPacketAsync(conn.io, reply);
-                        return true;
-                    }
-                    Notification?.Invoke(NotificationType.Info, $"Client {id} sent incorrect auth code {text}.");
-                    reply.Headers["Type"] = "AuthStatus";
-                    reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.WrongCode.ToString());
-                    await PacketIO.SendPacketAsync(conn.io, reply);
-                    return false;
-                }
-                return true;
-            case "SetPassword":
-                if (!passwords.ContainsKey(clientID)) {
-                    File.AppendAllText(passwordsFile, $"\n{clientID}, {text}");
-                    Notification?.Invoke(NotificationType.Info, $"Registered new user {clientID}.");
-
-                }
-                passwords[clientID] = text;
-                Notification?.Invoke(NotificationType.Info, $"Password for {clientID} updated.");
-                return true;
-            case "CreateNewUser":
-                var name = headers["Name"];
                 reply.Headers["Type"] = "AuthStatus";
-                if (name != clientID) {
-                    Notification?.Invoke(NotificationType.Warning, "Mismatched username and clientID. Closing connection.");
-                    reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Failed.ToString());
-                    await PacketIO.SendPacketAsync(conn.io, reply);
-                    return false;
+                reply.Payload = Encoding.UTF8.GetBytes(ServerAuth.AuthenticationStatus.WrongCode.ToString());
+                if (int.TryParse(text, out code)) {
+                    if (await auth.CheckAuthCode(code)) {
+                        Notification?.Invoke(NotificationType.Info, $"Client {id} sent correct auth code {text}.");
+                        reply.Payload = Encoding.UTF8.GetBytes(ServerAuth.AuthenticationStatus.Success.ToString());
+                    }
+                    else {
+                        Notification?.Invoke(NotificationType.Info, $"Client {id} sent incorrect auth code {text}.");
+                    }
                 }
-                if (passwords.ContainsKey(clientID)) {
-                    Notification?.Invoke(NotificationType.Warning, $"Client {id} tried to register using an existing username. Closing connection.");
-                    reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.UsernameTaken.ToString());
-                    await PacketIO.SendPacketAsync(conn.io, reply);
-                    return false;
-                }
-                //Otherwise we register the user
-                //Map their password hash to their name
-                passwords[name] = headers["PasswordHash"];
-                //Write new password and username to the file
-                File.AppendAllText(passwordsFile, $"\n{clientID}, {headers["PasswordHash"]}");
-                Notification?.Invoke(NotificationType.Info, $"User {name} registered.");
-                reply.Payload = Encoding.UTF8.GetBytes(AuthenticationStatus.Success.ToString());
                 await PacketIO.SendPacketAsync(conn.io, reply);
-                await SendInitialPackets(conn.io, id);
-
                 return true;
             case "FileStart":
-                await PacketIO.HandleFileStartAsync(conn.io, incoming, files, Name, defaultSaveDir);
+                await FileTransfer.HandleFileStartAsync(conn.io, incoming, files, Name, defaultSaveDir);
                 Notification?.Invoke(NotificationType.Info, "Received FileStart packet");
                 return true;
             case "FileChunk":
-                await PacketIO.HandleFileChunkAsync(incoming, files);
+                await FileTransfer.HandleFileChunkAsync(incoming, files);
 
                 //Progress logging
                 if (incoming.Headers.TryGetValue("FileKey", out var key) && files.TryGetValue(key, out var state)) {
@@ -679,12 +430,12 @@ public class Server : IAsyncDisposable {
                 }
                 return true;
             case "FileEnd":
-                await PacketIO.HandleFileEndAsync(conn.io, incoming, files, Name);
+                await FileTransfer.HandleFileEndAsync(conn.io, incoming, files, Name);
                 Notification?.Invoke(NotificationType.Info, "Received FileEnd packet");
                 return true;
             case "Disconnect":
                 Notification?.Invoke(NotificationType.Warning, $"Client {clientID} requested UDP disconnect.");
-                CloseUdpConnection();
+                vc.CloseUdpConnection();
                 return true;
             default:
                 Notification?.Invoke(NotificationType.Warning, $"Invalid packet header: {type}.");
@@ -702,29 +453,6 @@ public class Server : IAsyncDisposable {
             Notification?.Invoke(NotificationType.Info, $"Sending reply to client {currClient.Key}.");
             await PacketIO.SendPacketAsync(currClient.Value.io, packet);
         }
-    }
-
-    private async Task SendVoiceInviteWarningAsync(int clientId, string message) {
-        if (clients.TryGetValue(clientId, out var conn)) {
-            var packet = new Packet {
-                ClientID = "Server",
-                Headers = new Dictionary<string, string> { { "Type", "Message" } },
-                Payload = Encoding.UTF8.GetBytes(message)
-            };
-
-            await PacketIO.SendPacketAsync(conn.io, packet);
-        }
-    }
-
-    private async Task BroadcastDisconnectAsync(string reason) {
-        var packet = new Packet {
-            ClientID = "Server",
-            Headers = new Dictionary<string, string> { { "Type", "Disconnect" } },
-            Payload = Encoding.UTF8.GetBytes(reason)
-        };
-
-        await BroadcastAsync(packet);
-        CloseUdpConnection();
     }
 
     private async Task SendInitialPackets(Stream stream, int id) {
@@ -750,73 +478,8 @@ public class Server : IAsyncDisposable {
         //Send a file upon connection (DEV PURPOSES)
     }
 
-    // === Client Authentication ===
-    private async Task<AuthenticationStatus> AuthenticateClient(string username, string passwordHash, int clientId) {
-        if (names.TryGetValue(username, out var existingId)) {
-            if (!clients.ContainsKey(existingId)) {
-                names.TryRemove(username, out _);
-            }
-            else if (existingId != clientId) {
-                return AuthenticationStatus.AlreadyLoggedIn;
-            }
-        }
-        if (!passwords.ContainsKey(username)) {
-            return AuthenticationStatus.WrongUsername;
-        }
-        if (passwords[username] != passwordHash) {
-            return AuthenticationStatus.WrongPassword;
-        }
-        return AuthenticationStatus.Success;
-    }
 
-    private async Task ReadPasswords(string filename) {
-        try {
-            using (var fileReader = File.ReadLines(filename).GetEnumerator()) {
-                while (fileReader.MoveNext()) {
-                    var line = fileReader.Current;
-                    var parts = line.Split(", ");
-                    if (parts.Length != 2) {
-                        Notification?.Invoke(NotificationType.Info, $"Invalid line in password file: {line}");
-                        continue;
-                    }
-                    passwords[parts[0]] = parts[1];
-                }
-            }
-        }
-        catch (FileNotFoundException) {
-            Notification?.Invoke(NotificationType.Warning, "Password file not found. Users cannot connect until one is made. " +
-                "\nRun --create <name> <password> to create the file and the first user.");
-        }
-        catch (Exception e) {
-            Notification?.Invoke(NotificationType.Error, $"Unexepected exception: {e.Message}");
-        }
-    }
-
-    private void RemoveClient(int id) {
-        if (clients.TryRemove(id, out var conn)) {
-            try { conn.io.Dispose(); } catch { }
-            try { conn.socket.Dispose(); } catch { }
-        }
-
-        positions.TryRemove(id, out _);
-
-        var username = names.FirstOrDefault(kvp => kvp.Value == id).Key;
-        if (!string.IsNullOrEmpty(username)) {
-            names.TryRemove(username, out _);
-        }
-
-        if (pendingVoiceClientId == id) {
-            pendingVoiceClientId = null;
-            voiceInviteCts?.Cancel();
-            voiceInviteCts = null;
-        }
-
-        clientPlatforms.TryRemove(id, out _);
-        udpClients.TryRemove(id, out _);
-        voiceParticipants.TryRemove(id, out _);
-    }
-
-    private static bool IsSameMachine(Socket socket) {
+    internal static bool IsSameMachine(Socket socket) {
         if (socket.RemoteEndPoint is not IPEndPoint remote) {
             return false;
         }
@@ -843,17 +506,6 @@ public class Server : IAsyncDisposable {
         string emptyPart = new string('-', width - filled);
         return $"[{filledPart}{emptyPart}] {percent,5:0.0}%";
     }
-
-    private enum AuthenticationStatus {
-        Success,
-        Failed,
-        WrongPassword,
-        WrongUsername,
-        WrongCode,
-        UsernameTaken,
-        AlreadyLoggedIn
-    }
-
 
     // === Certificate Loading ===
     private X509Certificate2 LoadServerCertificate() {
@@ -915,86 +567,38 @@ public class Server : IAsyncDisposable {
                 return;
             case "file":
                 //skip verification for now
-                await PacketIO.SendFileAsync(_stream, args[0], pendingResponses);
+                await FileTransfer.SendFileAsync(_stream, args[0], pendingResponses);
                 return;
             case "accept":
-                if (pendingVoiceClientId is null) {
-                    Notification?.Invoke(NotificationType.Info, "No pending voice invite to accept.");
-                    return;
-                }
-
-                var inviteId = pendingVoiceClientId.Value;
-                pendingVoiceClientId = null;
-                voiceInviteCts?.Cancel();
-                voiceInviteCts = null;
-
-                if (clients.TryGetValue(inviteId, out var inviteConn)) {
-                    var acceptPacket = new Packet {
-                        ClientID = "Server",
-                        Headers = new Dictionary<string, string> { { "Type", "VoiceAccepted" } },
-                        Payload = Array.Empty<byte>()
-                    };
-
-                    await PacketIO.SendPacketAsync(inviteConn.io, acceptPacket);
-                    StartUdpListenerIfNeeded();
-                    disableServerMic = IsSameMachine(inviteConn.socket);
-                    if (disableServerMic) {
-                        Notification?.Invoke(NotificationType.Info, "Client is local; server microphone disabled.");
-                    }
-                    else {
-                        StartServerMicrophone();
-                    }
-                    Notification?.Invoke(NotificationType.Info, "Voice invite accepted. UDP listener started.");
-                }
-                else {
-                    Notification?.Invoke(NotificationType.Warning, "Client disconnected before invite could be accepted.");
-                }
+                await vc.AcceptInvite();
                 return;
             case "disconnect":
             case "dc":
-                await BroadcastDisconnectAsync("Server requested UDP disconnect.");
+                var packet = new Packet {
+                    ClientID = "Server",
+                    Headers = new Dictionary<string, string> { { "Type", "Disconnect" } },
+                    Payload = Encoding.UTF8.GetBytes("Server closed voice room.")
+                };
+                await BroadcastAsync(packet);
+                vc.CloseUdpConnection();
                 return;
             case "create":
                 if (args.Length != 2) {
                     Notification?.Invoke(NotificationType.Info, "Usage: --create <username> <password>");
                     return;
                 }
-                await CreateUserAsync(args[0], args[1]);
+                await auth.CreateUserAsync(args[0], args[1]);
                 return;
             case "list-users":
-                if (passwords.Count == 0) {
-                    Notification?.Invoke(NotificationType.Info, "No users registered.");
-                    return;
-                }
-                StringBuilder sb = new StringBuilder("Registered Users:");
-                foreach (var user in passwords.Keys) {
-                    sb.Append($"\n- {user}");
-                }
-                Notification?.Invoke(NotificationType.Info, sb.ToString());
+                await auth.ListUsers();
                 return;
             case "remove":
                 if (args.Length != 1) {
-                    Notification?.Invoke(NotificationType.Info, "Usage: --delete-user <username>");
+                    Notification?.Invoke(NotificationType.Info, "Usage: --remove <username> or <id>");
                     return;
                 }
-                var usernameToDelete = args[0];
-                if (!passwords.ContainsKey(usernameToDelete)) {
-                    Notification?.Invoke(NotificationType.Warning, $"User {usernameToDelete} does not exist.");
-                    return;
-                }
-                passwords.Remove(usernameToDelete, out var _);
-                //Rewrite the passwords file
-                try {
-                    using (var writer = new StreamWriter(passwordsFile, append: false)) {
-                        foreach (var kvp in passwords) {
-                            await writer.WriteLineAsync($"{kvp.Key}, {kvp.Value}");
-                        }
-                    }
-                    Notification?.Invoke(NotificationType.Info, $"User {usernameToDelete} deleted successfully.");
-                }
-                catch (Exception e) {
-                    Notification?.Invoke(NotificationType.Error, $"Failed to delete user from file: {e.Message}");
-                }
+                var name = args[0];
+                await auth.RemoveClient(name);
                 return;
             default:
                 Notification?.Invoke(NotificationType.Info, "Unknown command.");
@@ -1002,28 +606,9 @@ public class Server : IAsyncDisposable {
         }
     }
 
-    private async Task CreateUserAsync(string name, string password) {
-        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(password)) {
-            Notification?.Invoke(NotificationType.Warning, "Name or password cannot be empty. Aborting.");
-            return;
-        }
-        if (passwords.ContainsKey(name)) {
-            Notification?.Invoke(NotificationType.Warning, "User with that name already exists. Aborting.");
-            return;
-        }
-        var passwordHash = Utility.SHA256Hash(password);
-        passwords[name] = passwordHash;
-        if (!File.Exists(passwordsFile)) {
-            Notification?.Invoke(NotificationType.Info, "Created passwords.txt file.");
-        }
-        //AppendAllText creates file if it doesn't exist, we just fire the notification first
-        await File.AppendAllTextAsync(passwordsFile, $"{name}, {passwordHash}\n");
-        Notification?.Invoke(NotificationType.Info, $"Created user {name} successfully.");
-    }
-
     // === IDisposable Implementation ===
     public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
-        StopServerMicrophone();
+        vc.StopServerMicrophone();
     }
 }

@@ -1,48 +1,16 @@
 using Common;
 using System;
 using System.Text;
+using static Common.Utility;
 
 namespace Client_Server;
 
 class CLI {
     static async Task Main(string[] args) {
-        var client = new Client();
-        bool disconnected = false;
-        object consoleLock = new object();
-        client.MessageReceived += (sender, msg) => Console.WriteLine($"{sender}: {msg}");
-        client.WhisperReceived += (from, msg) => Console.WriteLine($"(Whisper) {from}: {msg}");
-        client.IdAssigned += id => Console.Title = $"Client {id}";
-        client.CommandsReceived += cmds => Console.WriteLine("Received commands list.");
-        client.Error += msg => {
-            disconnected = true;
-            lock (consoleLock) {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.Write($"Error: {msg} ");
-                Console.ResetColor();
-            }
-        };
-        client.Notification += (type, msg) => {
-            Console.ForegroundColor = type switch {
-                NotificationType.Info => ConsoleColor.Green,
-                NotificationType.Warning => ConsoleColor.Yellow,
-                NotificationType.Error => ConsoleColor.Red,
-                _ => ConsoleColor.White,
-            };
-            Console.WriteLine($"{msg}");
-            Console.ResetColor();
-        };
-        client.Disconnected += () => {
-            disconnected = true;
-            lock (consoleLock) {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.Write("Server disconnected.");
-            }
-        };
-
         Console.Write("Enter server host or press Enter for this device's IP: ");
         string host = Console.ReadLine();
         if (string.IsNullOrWhiteSpace(host)) {
-            host = Utility.GetLocalIP();
+            host = GetLocalIP();
         }
         string username = "";
         string password = "";
@@ -57,15 +25,18 @@ class CLI {
         if (!string.IsNullOrWhiteSpace(portEnv) && int.TryParse(portEnv, out var parsedPort)) {
             port = parsedPort;
         }
-
+        var client = new Client();
+        //Wires all the console logs to the events
+        InitEvents(client);
+        client.Initialize(host, port);
         Console.WriteLine($"Connecting to server at {host}:{port}...");
-        await client.ConnectAsync(host, port, username, hash);
+        await client.ConnectAsync(username, hash);
 
         Console.Title = client.Name;
 
-        while (!disconnected) {
+        while (true) {
             var line = Console.ReadLine();
-            if (line is null || line == "\\q" || disconnected) break;
+            if (line is null || line == "\\q") break;
             try {
                 if (line.StartsWith("--file")) {
                     if (line.Length < 8) {
@@ -97,7 +68,7 @@ class CLI {
                             }
                         }
                     }
-                    await PacketIO.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
+                    await FileTransfer.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
                 }
                 else if (line.StartsWith("--voice")) {
                     var inviteeText = line.Length > 8 ? line[8..] : string.Empty;
@@ -105,10 +76,10 @@ class CLI {
                     if (invitees.Length == 0) {
                         invitees = new[] { "Server" };
                     }
-                    await client.SendVoiceInviteAsync(invitees);
+                    await client.StartVoiceRoom(invitees);
                 }
                 else if (line.StartsWith("--disconnect") || line.StartsWith("--dc")) {
-                    await client.SendDisconnectAsync("Client requested UDP disconnect.");
+                    await client.LeaveVoiceRoom("Client requested UDP disconnect.");
                 }
                 else if (line.StartsWith("--")) {
                     await client.SendCommandAsync(line[2..]);
@@ -123,14 +94,9 @@ class CLI {
             }
             catch (Exception e) {
                 Console.WriteLine(e.Message);
-                disconnected = true;
                 break;
             }
         }
-        //Here's 
-        Console.Write("Press any key to exit...");
-        Console.ReadKey(intercept: true);
-        Environment.Exit(disconnected ? 1 : 0);
     }
 
     static string ReadPassword() {
@@ -143,5 +109,30 @@ class CLI {
         }
         Console.WriteLine();
         return sb.ToString();
+    }
+
+    static void InitEvents(Client client) {
+        object consoleLock = new object();
+
+        client.MessageReceived += (sender, msg) => Console.WriteLine($"{sender}: {msg}");
+        client.WhisperReceived += (from, msg) => Console.WriteLine($"(Whisper) {from}: {msg}");
+        client.IdAssigned += id => Console.Title = $"Client {id}";
+        client.CommandsReceived += cmds => Console.WriteLine("Received commands list.");
+        client.Error += msg => {
+            Environment.Exit(1);
+        };
+        client.Notification += (type, msg) => {
+            Console.ForegroundColor = type switch {
+                NotificationType.Info => ConsoleColor.Green,
+                NotificationType.Warning => ConsoleColor.Yellow,
+                NotificationType.Error => ConsoleColor.Red,
+                _ => ConsoleColor.White,
+            };
+            Console.WriteLine($"{msg}");
+            Console.ResetColor();
+        };
+        client.Disconnected += () => {
+            Environment.Exit(1);
+        };
     }
 }

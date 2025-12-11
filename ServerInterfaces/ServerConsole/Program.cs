@@ -1,20 +1,21 @@
 using Client_Server;
-using Common;
+using static Common.Utility;
 using System.Text;
 
 class Program {
     static async Task Main(string[] args) {
-        var server = new Server();
-        //Set this so it can display the progress bar
-        Console.OutputEncoding = Encoding.UTF8;
-        server.MessageReceived += (sender, msg) => Console.WriteLine($"{sender}: {msg}");
         int port = 11111;
-
 	    //Try to read port from env variable
 	    var portEnv = Environment.GetEnvironmentVariable("APP_PORT");
 	    if (!string.IsNullOrWhiteSpace(portEnv) && int.TryParse(portEnv, out var parsedPort)) {
 		    port = parsedPort;
 	    }
+        var server = new Server();
+
+        //Set this so it can display the progress bar
+        Console.OutputEncoding = Encoding.UTF8;
+        server.MessageReceived += (sender, msg) => Console.WriteLine($"{sender}: {msg}");
+
         server.Notification += (type, msg) =>
         {
             bool isProgress = msg.StartsWith("[PROGRESS]");
@@ -48,9 +49,9 @@ class Program {
             Console.ResetColor();
         };
 
-
         Console.WriteLine("Starting server...");
-        var serverTask = server.ExecuteServerAsync(port);
+        server.Initialize(port);
+        var serverTask = server.Start();
 
         // Start console loop here
         _ = Task.Run(async () =>
