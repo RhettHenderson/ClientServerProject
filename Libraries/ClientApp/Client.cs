@@ -69,29 +69,18 @@ public class Client : IAsyncDisposable {
             );
 
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions {
-                TargetHost = "localhost",
+                TargetHost = serverIp.ToString(),
                 EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                 CertificateRevocationCheckMode = X509RevocationMode.NoCheck
             });
 
             stream = ssl;
         }
-        catch (AuthenticationException) {
+        catch (Exception) {
             Notification?.Invoke(NotificationType.Warning, "SSL negotiation failed. Falling back to unencrypted connection.");
 
-            try { stream.Dispose(); } catch { }
-            try { socket.Dispose(); } catch { }
-
-            socket = new Socket(serverIp.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-            await socket.ConnectAsync(new IPEndPoint(serverIp, serverPort));
-            net = new NetworkStream(socket, ownsSocket: true);
-            stream = net;
-        }
-        catch (IOException) {
-            Notification?.Invoke(NotificationType.Warning, "SSL negotiation failed due to IO error. Falling back to unencrypted connection.");
-
-            try { stream.Dispose(); } catch { }
-            try { socket.Dispose(); } catch { }
+            await stream.DisposeAsync();
+            socket.Dispose();
 
             socket = new Socket(serverIp.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             await socket.ConnectAsync(new IPEndPoint(serverIp, serverPort));

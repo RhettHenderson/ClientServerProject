@@ -22,7 +22,6 @@ public class Server : IAsyncDisposable {
     internal sealed class Conn {
         public Socket socket { get; }
         public Stream io { get; }
-
         public Conn(Socket s, Stream i) {
             socket = s;
             io = i;
@@ -35,6 +34,7 @@ public class Server : IAsyncDisposable {
     private static readonly ConcurrentDictionary<string, FileReceiveState> files = new();  // fileKey -> state
     private static readonly ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new(); // expectedType -> TaskCompletionSource
     internal readonly ConcurrentDictionary<int, string> clientPlatforms = new(); // ID -> platform name
+    private int reconnectingID = 0;
 
     // === File I/O ===
     private static Stream _stream = null;
@@ -116,6 +116,8 @@ public class Server : IAsyncDisposable {
     public async Task<int> WaitForConnectionAsync() {
         Notification?.Invoke(NotificationType.Info, "Waiting for connection...");
         Socket client = await listener.AcceptAsync();
+        int id = Interlocked.Increment(ref nextID);
+        Notification?.Invoke(NotificationType.Info, $"Client #{id} initiated handshake.");
         //Uses the Nagle algorithm (google for more info)
         client.NoDelay = true;
 
@@ -137,10 +139,20 @@ public class Server : IAsyncDisposable {
             Notification?.Invoke(NotificationType.Info, "SSL certificate loaded successfully. Using encrypted connection.");
         }
         catch (InvalidOperationException) {
+            if (reconnectingID == id) {
+                Notification?.Invoke(NotificationType.Info, "Client is reconnecting after SSL error. Using unencrypted connection.");
+                stream = net;
+                reconnectingID = 0;
+                clients[id] = new Conn(client, stream);
+                return id;
+            }
             Notification?.Invoke(NotificationType.Warning,
                 "WARNING: SSL certificate is not present. " +
                 "Ignore this if you intend to use it unencrypted, otherwise refer to the README for instructions on setting up a dev certificate.");
+            Notification?.Invoke(NotificationType.Warning, $"Client {id} disconnected during handshake due to SSL error.");
             stream = net; // Fallback to non-SSL
+            reconnectingID = id;
+            Interlocked.Decrement(ref nextID);
         }
         catch (Exception e) {
             Notification?.Invoke(NotificationType.Error, $"Failed to establish SSL: {e.Message}. Falling back to unencrypted connection.");
@@ -148,10 +160,7 @@ public class Server : IAsyncDisposable {
         }
 
         _stream = stream;
-
-        int id = Interlocked.Increment(ref nextID);
         clients[id] = new Conn(client, stream);
-        Notification?.Invoke(NotificationType.Info, $"Client #{id} connected.");
         return id;
     }
 
@@ -366,6 +375,7 @@ public class Server : IAsyncDisposable {
                         Notification?.Invoke(NotificationType.Info, $"Client {id} authenticated successfully as {clientID}.");
                         names[clientID] = id;
                         await SendInitialPackets(conn.io, id);
+                        Notification?.Invoke(NotificationType.Info, $"Client {id} is now connected.");
                         return true;
                     case ServerAuth.AuthenticationStatus.WrongPassword:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} used the wrong password. Closing connection.");
