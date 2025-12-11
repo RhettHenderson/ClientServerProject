@@ -6,7 +6,7 @@ using System.Net.Sockets;
 using System.Text;
 using static Common.Utility;
 
-namespace Client_Server;
+namespace ServerApp;
 
 internal class VoiceChatManager {
     internal Socket? udp;
@@ -254,7 +254,7 @@ internal class VoiceChatManager {
 
             await PacketIO.SendPacketAsync(inviteConn.io, acceptPacket);
             StartUdpListenerIfNeeded();
-            disableServerMic = Server.IsSameMachine(inviteConn.socket);
+            disableServerMic = ServerUtils.IsSameMachine(inviteConn.socket);
             if (disableServerMic) {
                 Notification?.Invoke(NotificationType.Info, "Client is local; server microphone disabled.");
             }

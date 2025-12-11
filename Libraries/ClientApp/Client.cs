@@ -9,9 +9,8 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
-using ClientApp;
 
-namespace Client_Server;
+namespace ClientApp;
 
 public class Client : IAsyncDisposable {
     // === Static Fields ===

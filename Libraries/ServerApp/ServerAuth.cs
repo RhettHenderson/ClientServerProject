@@ -1,14 +1,9 @@
 using Common;
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Net.Sockets;
 using System.Text;
-using static Client_Server.Server;
 using static Common.Utility;
-using static System.Net.Mime.MediaTypeNames;
 
-namespace Client_Server;
+namespace ServerApp;
 internal class ServerAuth {
 
     // === ServerAuth-specific Fields ===

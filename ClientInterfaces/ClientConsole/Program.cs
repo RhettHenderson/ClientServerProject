@@ -2,10 +2,13 @@ using Common;
 using System;
 using System.Text;
 using static Common.Utility;
+using ClientApp;
 
-namespace Client_Server;
+class Program {
 
-class CLI {
+    //TODO: Clean up Client Console command handling and Main method
+    //TODO: Figure out why voice command triggers the SocketException every time
+
     static async Task Main(string[] args) {
         Console.Write("Enter server host or press Enter for this device's IP: ");
         string host = Console.ReadLine();
