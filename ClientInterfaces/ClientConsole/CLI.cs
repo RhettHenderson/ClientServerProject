@@ -18,7 +18,7 @@ class CLI {
         username = Console.ReadLine() ?? "Client";
         Console.Write("Password: ");
         password = ReadPassword();
-        var hash = Utility.SHA256Hash(password);
+        var hash = SHA256Hash(password);
 
         int port = 11111;
         var portEnv = Environment.GetEnvironmentVariable("APP_PORT");
@@ -119,6 +119,8 @@ class CLI {
         client.IdAssigned += id => Console.Title = $"Client {id}";
         client.CommandsReceived += cmds => Console.WriteLine("Received commands list.");
         client.Error += msg => {
+            Console.WriteLine($"\n\nError: {msg} Press any key to exit...");
+            Console.ReadKey();
             Environment.Exit(1);
         };
         client.Notification += (type, msg) => {
@@ -132,6 +134,8 @@ class CLI {
             Console.ResetColor();
         };
         client.Disconnected += () => {
+            Console.WriteLine("\n\nServer disconnected. Press any key to exit...");
+            Console.ReadKey();
             Environment.Exit(1);
         };
     }
