@@ -35,7 +35,7 @@ public class Server : IAsyncDisposable {
     private static readonly ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new(); // expectedType -> TaskCompletionSource
 
     // === Authentication ===
-    private static readonly ConcurrentDictionary<string, string> passwords = new();        // username -> password hash
+    private static ConcurrentDictionary<string, string> passwords = new();        // username -> password hash
     private static int currentAuthCode = 111111;
     private static string passwordsFile = "passwords.txt";
 
@@ -960,6 +960,41 @@ public class Server : IAsyncDisposable {
                     return;
                 }
                 await CreateUserAsync(args[0], args[1]);
+                return;
+            case "list-users":
+                if (passwords.Count == 0) {
+                    Notification?.Invoke(NotificationType.Info, "No users registered.");
+                    return;
+                }
+                StringBuilder sb = new StringBuilder("Registered Users:");
+                foreach (var user in passwords.Keys) {
+                    sb.Append($"\n- {user}");
+                }
+                Notification?.Invoke(NotificationType.Info, sb.ToString());
+                return;
+            case "remove":
+                if (args.Length != 1) {
+                    Notification?.Invoke(NotificationType.Info, "Usage: --delete-user <username>");
+                    return;
+                }
+                var usernameToDelete = args[0];
+                if (!passwords.ContainsKey(usernameToDelete)) {
+                    Notification?.Invoke(NotificationType.Warning, $"User {usernameToDelete} does not exist.");
+                    return;
+                }
+                passwords.Remove(usernameToDelete, out var _);
+                //Rewrite the passwords file
+                try {
+                    using (var writer = new StreamWriter(passwordsFile, append: false)) {
+                        foreach (var kvp in passwords) {
+                            await writer.WriteLineAsync($"{kvp.Key}, {kvp.Value}");
+                        }
+                    }
+                    Notification?.Invoke(NotificationType.Info, $"User {usernameToDelete} deleted successfully.");
+                }
+                catch (Exception e) {
+                    Notification?.Invoke(NotificationType.Error, $"Failed to delete user from file: {e.Message}");
+                }
                 return;
             default:
                 Notification?.Invoke(NotificationType.Info, "Unknown command.");

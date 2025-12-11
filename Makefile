@@ -5,8 +5,8 @@
 COMMON_PROJ := Libraries/Common/Common.csproj
 SERVER_PROJ := Libraries/ServerApp/ServerApp.csproj
 CLIENT_PROJ := Libraries/ClientApp/ClientApp.csproj
-SERVER_CLI_PROJ := ServerInterfaces/CLI/CLI.csproj
-CLIENT_CLI_PROJ := ClientInterfaces/CLI/CLI.csproj
+SERVER_CLI_PROJ := ServerInterfaces/ServerConsole/ServerConsole.csproj
+CLIENT_CLI_PROJ := ClientInterfaces/ClientConsole/ClientConsole.csproj
 
 # =============================
 # Build settings

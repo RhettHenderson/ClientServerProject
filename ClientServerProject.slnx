@@ -1,5 +1,6 @@
 <Solution>
-  <Project Path="ClientInterfaces/CLI/CLI.csproj" />
+  <Project Path="ClientInterfaces/ClientConsole/ClientConsole.csproj" />
+  <Project Path="ServerInterfaces/ServerConsole/ServerConsole.csproj" />
   <Project Path="Libraries/ClientApp/ClientApp.csproj" />
   <Project Path="Libraries/Common/Common.csproj" />
   <Project Path="Libraries/ServerApp/ServerApp.csproj" />
