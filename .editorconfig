@@ -8,7 +8,6 @@ tab_width = 4
 charset = utf-8
 end_of_line = crlf
 trim_trailing_whitespace = true
-insert_final_newline = true
 max_line_length = 200
 
 # C# Rules
@@ -67,3 +66,6 @@ csharp_space_before_comma = false
 
 # No spaces between attribute brackets
 csharp_space_between_square_brackets = false
+
+#Use file-scoped namespaces by default, e.g. namespace X; instead of namespace X {}
+csharp_style_namespace_declarations = file_scoped
