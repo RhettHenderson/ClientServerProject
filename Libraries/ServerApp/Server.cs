@@ -58,15 +58,16 @@ public class Server : IAsyncDisposable {
     public void Initialize(int port) {
         listeningPort = port;
         Console.Title = "Server";
+        InitListener(GetLocalIP());
         this.vc = new VoiceChatManager(listeningIp, listeningPort, names, clients, Notification, Name);
         this.auth = new ServerAuth(Notification, names, clients, this.vc, clientPlatforms);
+        auth.Load();
         try {
             defaultSaveDir = KnownFolders.Downloads.Path;
         }
         catch (Exception e) {
             defaultSaveDir = "/downloads";
         }
-        InitListener(GetLocalIP());
     }
 
     // === Main Server Loop ===
@@ -74,7 +75,6 @@ public class Server : IAsyncDisposable {
         await AcceptLoopAsync();
     }
     public void InitListener(string ip) {
-        auth.Load();
         IPAddress ipAddr;
         if (ip == "") {
             ipAddr = IPAddress.Loopback; //127.0.0.1
