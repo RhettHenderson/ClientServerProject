@@ -13,6 +13,7 @@ internal class VoiceSessionManager {
     internal readonly object udpLock = new();
     internal bool playbackWarningSent = false;
     internal AudioPlayer? _player;
+    internal OpusCodec? _codec;
     internal event Action<NotificationType, string> Notification;
     internal string Name;
     internal string PlatformName;
@@ -35,6 +36,8 @@ internal class VoiceSessionManager {
         Notification?.Invoke(NotificationType.Info, "Starting microphone capture...");
         var rec = new MicRecorder(frameMs: 10);
         rec.Start();
+        var codec = EnsureCodec();
+        var encodedBuffer = new byte[codec.MaxPacketSize];
         var remote = new IPEndPoint(ip, port);
 
         // === Sequencing ===
@@ -58,6 +61,10 @@ internal class VoiceSessionManager {
                     var slice = new byte[take];
                     Buffer.BlockCopy(frame, offset, slice, 0, take);
 
+                    int encodedLength = codec.Encode(slice, encodedBuffer);
+                    var payload = new byte[encodedLength];
+                    Buffer.BlockCopy(encodedBuffer, 0, payload, 0, encodedLength);
+
                     // 3) Add minimal sequencing metadata (headers) for VoIP
                     var audio = new Packet {
                         ClientID = Name, // your ID string
@@ -67,9 +74,9 @@ internal class VoiceSessionManager {
                             { "Protocol", "UDP" },
                             { "Seq", seq.ToString() },
                             { "Ts",  timestampSamples.ToString() }, // samples @ 48k
-                            { "Fmt", "PCM16_48k_Mono" }
+                            { "Fmt", codec.FormatLabel }
                         },
-                        Payload = slice
+                        Payload = payload
                     };
                     PacketIO.SendPacketToAsyncUdp(udp, audio, remote);
 
@@ -103,7 +110,9 @@ internal class VoiceSessionManager {
                         }
                         if (PlatformName == "Windows") {
                             EnsurePlayer();
-                            _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                            var codec = EnsureCodec();
+                            var pcm = codec.Decode(packet.Payload);
+                            _player?.AddFrame(pcm, 0, pcm.Length);
                         }
                         else if (!playbackWarningSent) {
                             playbackWarningSent = true;
@@ -203,5 +212,10 @@ internal class VoiceSessionManager {
         }
 
         _player = new AudioPlayer(latencyMs: 100, jitterMs: 600);
+    }
+
+    internal OpusCodec EnsureCodec() {
+        _codec ??= new OpusCodec(frameMs: 10, bitrate: 32000);
+        return _codec;
     }
 }

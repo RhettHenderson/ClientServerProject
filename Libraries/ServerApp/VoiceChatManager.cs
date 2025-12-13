@@ -19,6 +19,7 @@ internal class VoiceChatManager {
     internal AudioPlayer? _player;
     internal MicRecorder? _mic;
     internal Thread? micSenderThread;
+    internal OpusCodec? _codec;
     internal bool disableServerMic;
     internal readonly IPAddress? listeningIp;
     internal readonly int listeningPort;
@@ -75,7 +76,9 @@ internal class VoiceChatManager {
 
                 if (voiceParticipants.ContainsKey(0) && serverPlatform == "Windows") {
                     EnsureServerPlayer();
-                    _player?.AddFrame(packet.Payload, 0, packet.Payload.Length);
+                    var codec = EnsureCodec();
+                    var pcm = codec.Decode(packet.Payload);
+                    _player?.AddFrame(pcm, 0, pcm.Length);
                 }
             }
             catch (ObjectDisposedException) {
@@ -139,6 +142,9 @@ internal class VoiceChatManager {
             const int samplesPer10ms = 480;
             const int maxFrameBytes = samplesPer10ms * bytesPerSample;
 
+            var codec = EnsureCodec();
+            var encodedBuffer = new byte[codec.MaxPacketSize];
+
             uint seq = 0;
             int timestampSamples = 0;
 
@@ -154,6 +160,10 @@ internal class VoiceChatManager {
                     var slice = new byte[take];
                     Buffer.BlockCopy(frame, offset, slice, 0, take);
 
+                    int encodedLength = codec.Encode(slice, encodedBuffer);
+                    var payload = new byte[encodedLength];
+                    Buffer.BlockCopy(encodedBuffer, 0, payload, 0, encodedLength);
+
                     var packet = new Packet {
                         ClientID = Name,
                         Headers = new Dictionary<string, string>
@@ -162,9 +172,9 @@ internal class VoiceChatManager {
                             { "Protocol", "UDP" },
                             { "Seq", seq.ToString() },
                             { "Ts", timestampSamples.ToString() },
-                            { "Fmt", "PCM16_48k_Mono" }
+                            { "Fmt", codec.FormatLabel }
                         },
-                        Payload = slice
+                        Payload = payload
                     };
 
                     var endpoints = udpClients
@@ -201,6 +211,11 @@ internal class VoiceChatManager {
         }
 
         _player = new AudioPlayer(latencyMs: 100, jitterMs: 600);
+    }
+
+    internal OpusCodec EnsureCodec() {
+        _codec ??= new OpusCodec(frameMs: 10, bitrate: 32000);
+        return _codec;
     }
 
     internal void CloseUdpConnection() {
