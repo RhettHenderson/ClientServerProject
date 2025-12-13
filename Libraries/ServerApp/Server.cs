@@ -517,7 +517,10 @@ public class Server : IAsyncDisposable {
                 Notification?.Invoke(NotificationType.Info, $"Default save directory set to {defaultSaveDir}");
                 return;
             case "file":
-                //skip verification for now
+                if (args.Length != 1) {
+                    Notification?.Invoke(NotificationType.Info, "Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
+                    return;
+                }
                 await FileTransfer.SendFileAsync(_stream, args[0], pendingResponses);
                 return;
             case "accept":

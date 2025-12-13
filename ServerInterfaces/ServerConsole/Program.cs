@@ -57,6 +57,8 @@ class Program {
         _ = Task.Run(async () =>
         {
             while (true) {
+                try {
+
                 var line = Console.ReadLine();
                 if (string.IsNullOrWhiteSpace(line)) continue;
 
@@ -64,6 +66,10 @@ class Program {
                     await server.HandleServerCommandAsync(line[2..].Trim());
                 else
                     await server.SendMessageAsync(line.Trim());
+                }
+                catch (Exception e) {
+                    Console.WriteLine($"Error processing command: {e.Message}");
+                }
             }
         });
 

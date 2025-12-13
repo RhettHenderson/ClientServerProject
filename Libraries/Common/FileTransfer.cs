@@ -7,7 +7,8 @@ public static class FileTransfer {
     public static async Task<bool> SendFileAsync(Stream stream, string localPath, ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses,
     string? remoteFilename = null, string? saveLocation = null, Action<NotificationType, string>? Notification = null) {
 
-        if (File.Exists(localPath)) {
+        if (!File.Exists(localPath)) {
+            Notification?.Invoke(NotificationType.Error, $"File not found: {localPath}");
             return false;
         }
 

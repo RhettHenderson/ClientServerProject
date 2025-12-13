@@ -271,6 +271,83 @@ public class Client : IAsyncDisposable {
         }
     }
 
+    public async Task HandleClientCommandAsync(string line) {
+        if (line is null) return;
+        var parts = line.Split(' ');
+        var cmd = parts[0];
+        var args = parts.Skip(1).ToArray();
+        switch (cmd) {
+            case "file":
+                string? localPath = null;
+                string? remoteFilename = null;
+                string? saveLocation = null;
+                string correctUsage = "Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]";
+                if (args.Length < 1 || args.Length > 5) {
+                    Notification?.Invoke(NotificationType.Info, correctUsage);
+                    return;
+                }
+                else {
+                    for (int i = 0; i < args.Length; i++) {
+                        try {
+                            if (i == 0) {
+                                localPath = args[i];
+                            }
+                            else if (args[i] == "-r") {
+                                //This check will return the first index of any invalid characters
+                                if (args[i + 1].IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) {
+                                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid filename");
+                                    return;
+                                }
+                                if (String.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1] == "-s") {
+                                    Notification?.Invoke(NotificationType.Info, correctUsage);
+                                    return;
+                                }
+                                remoteFilename = args[i + 1];
+                                //Skip the next element since we handled it here
+                                i++;
+                                continue;
+                            }
+                            else if (args[i] == "-s") {
+                                //Same error checking as above
+                                if (args[i + 1].IndexOfAny(Path.GetInvalidPathChars()) >= 0) {
+                                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid path");
+                                    return;
+                                }
+                                if (String.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1] == "-r") {
+                                    Notification?.Invoke(NotificationType.Info, correctUsage);
+                                    return;
+                                }
+                                saveLocation = args[i + 1];
+                                i++;
+                                continue;
+                            }
+                        }
+                        //catches the case that the user specified a -r or -s option without an argument following
+                        catch (IndexOutOfRangeException e) {
+                            Notification?.Invoke(NotificationType.Info, correctUsage);
+                            return;
+                        }
+                    }
+                    await FileTransfer.SendFileAsync(_stream, localPath!, pendingResponses, remoteFilename, saveLocation);
+                    return;
+                }
+            case "voice":
+                var invitees = args;
+                if (invitees.Length == 0) {
+                    invitees = new[] { "Server" };
+                }
+                await StartVoiceRoom(invitees);
+                return;
+            case "disconnect":
+            case "dc":
+                await LeaveVoiceRoom($"{Name} left the voice room");
+                return;
+            default:
+                Notification?.Invoke(NotificationType.Warning, "Unknown command");
+                return;
+        }
+    }
+
     // === IDisposable Implementation ===
     public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }

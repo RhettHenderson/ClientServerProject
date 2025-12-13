@@ -41,52 +41,10 @@ class Program {
             var line = Console.ReadLine();
             if (line is null || line == "\\q") break;
             try {
-                if (line.StartsWith("--file")) {
-                    if (line.Length < 8) {
-                        Console.WriteLine("Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
-                        continue;
-                    }
-                    string? localPath = null;
-                    string? remoteFilename = null;
-                    string? saveLocation = null;
-                    args = line[7..].Split(" ");
-                    if (args.Length < 1 || args.Length > 5) {
-                        Console.WriteLine("Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
-                        continue;
-                    }
-                    else {
-                        for (int i = 0; i < args.Length; i++) {
-                            if (i == 0) {
-                                localPath = args[i];
-                            }
-                            else if (args[i] == "-r" && i + 1 < args.Length) {
-                                remoteFilename = args[i + 1];
-                                i++;
-                                continue;
-                            }
-                            else if (args[i] == "-s" && i + 1 < args.Length) {
-                                saveLocation = args[i + 1];
-                                i++;
-                                continue;
-                            }
-                        }
-                    }
-                    await FileTransfer.SendFileAsync(client._stream, localPath!, client.pendingResponses, remoteFilename, saveLocation);
+                if (line.StartsWith("--")) {
+                    await client.HandleClientCommandAsync(line[2..].Trim());
                 }
-                else if (line.StartsWith("--voice")) {
-                    var inviteeText = line.Length > 8 ? line[8..] : string.Empty;
-                    var invitees = inviteeText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (invitees.Length == 0) {
-                        invitees = new[] { "Server" };
-                    }
-                    await client.StartVoiceRoom(invitees);
-                }
-                else if (line.StartsWith("--disconnect") || line.StartsWith("--dc")) {
-                    await client.LeaveVoiceRoom("Client requested UDP disconnect.");
-                }
-                else if (line.StartsWith("--")) {
-                    await client.SendCommandAsync(line[2..]);
-                }
+                
                 else {
                     //Move cursor to start of line and add "You: "
                     var pos = Console.GetCursorPosition();
@@ -97,7 +55,7 @@ class Program {
             }
             catch (Exception e) {
                 Console.WriteLine(e.Message);
-                break;
+                continue;
             }
         }
     }
