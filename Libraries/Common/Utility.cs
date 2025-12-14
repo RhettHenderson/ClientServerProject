@@ -8,16 +8,55 @@ using System.Text;
 
 namespace Common;
 public class Utility {
-    public static string SHA256Hash(string input) {
-        SHA256 hasher = SHA256.Create();
-        byte[] hashValue = hasher.ComputeHash(Encoding.UTF8.GetBytes(input));
-        StringBuilder sb = new StringBuilder();
-        foreach (byte b in hashValue) {
-            //x2 is the format specifier for hex with 2 digits
-            sb.Append(b.ToString("x2"));
+    // Format:
+    // pbkdf2-sha512$<iterations>$<saltBase64>$<dkBase64>
+    public static string HashPasswordPBKDF2(string password, int iterations = 310_000) {
+        if (string.IsNullOrWhiteSpace(password)) {
+            throw new ArgumentException("Password cannot be null or whitespace.", nameof(password));
         }
-        return sb.ToString();
+        if (iterations < 100_000) {
+            throw new ArgumentOutOfRangeException("Iterations must be at least 100,000.", nameof(iterations));
+        }
+
+        byte[] salt = RandomNumberGenerator.GetBytes(16); //128-bit salt
+        byte[] dk = Rfc2898DeriveBytes.Pbkdf2(
+            password: password,
+            salt: salt,
+            iterations: iterations,
+            hashAlgorithm: HashAlgorithmName.SHA512,
+            outputLength: 64 //512-bit derived key
+        );
+        return $"pbkdf2-sha512${iterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(dk)}";
     }
+
+    public static bool VerifyPasswordPBKDF2(string password, string storedHash) {
+        if (string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(storedHash)) {
+            return false;
+        }
+        string[] parts = storedHash.Split('$', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 4 || !parts[0].Equals("pbkdf2-sha512")) {
+            throw new FormatException("Stored hash is not in the correct format.");
+        }
+        if (!int.TryParse(parts[1], out int iterations)) return false;
+        byte[] salt, expectedDk;
+        try {
+            salt = Convert.FromBase64String(parts[2]);
+            expectedDk = Convert.FromBase64String(parts[3]);
+        }
+        catch {
+            return false;
+        }
+        byte[] computedDk = Rfc2898DeriveBytes.Pbkdf2(
+            password: password,
+            salt: salt,
+            iterations: iterations,
+            hashAlgorithm: HashAlgorithmName.SHA512,
+            outputLength: expectedDk.Length
+        );
+
+        return CryptographicOperations.FixedTimeEquals(expectedDk, computedDk);
+    }
+
     public static int GenerateAuthCode(ref int outCode, int digits = 6) {
         //min is 10^(digits-1), max is 10^digits
         //since rand.Next is exclusive on the upper bound, we let max go up to 10^digits without subtracting the 1

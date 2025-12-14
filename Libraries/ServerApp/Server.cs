@@ -477,14 +477,10 @@ public class Server : IAsyncDisposable {
         };
         await PacketIO.SendPacketAsync(stream, pkt);
 
-        pkt.Headers = new Dictionary<string, string>
-        {
-            { "Type", "Data" },
-            { "Var", "commands" }
-        };
-        pkt.Payload = cmdJson;
+        pkt.Headers["Type"] = "AuthSuccess";
+        pkt.Headers.Remove("Var");
+        pkt.Payload = Array.Empty<byte>();
         await PacketIO.SendPacketAsync(stream, pkt);
-        //Send a file upon connection (DEV PURPOSES)
     }
 
     public async Task SendMessageAsync(string message) {

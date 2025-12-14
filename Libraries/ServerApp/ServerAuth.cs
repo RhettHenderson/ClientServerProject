@@ -59,7 +59,7 @@ internal class ServerAuth {
             Notification?.Invoke(NotificationType.Warning, "User with that name already exists. Aborting.");
             return;
         }
-        var passwordHash = Utility.SHA256Hash(password);
+        var passwordHash = HashPasswordPBKDF2(password);
         passwords[name] = passwordHash;
         if (!File.Exists(passwordsFile)) {
             Notification?.Invoke(NotificationType.Info, "Created passwords.txt file.");
@@ -69,7 +69,7 @@ internal class ServerAuth {
         Notification?.Invoke(NotificationType.Info, $"Created user {name} successfully.");
     }
 
-    internal async Task<AuthenticationStatus> AuthenticateClient(string username, string passwordHash, int clientId) {
+    internal async Task<AuthenticationStatus> AuthenticateClient(string username, string password, int clientId) {
         if (names.TryGetValue(username, out var existingId)) {
             if (!clients.ContainsKey(existingId)) {
                 names.TryRemove(username, out _);
@@ -78,10 +78,10 @@ internal class ServerAuth {
                 return AuthenticationStatus.AlreadyLoggedIn;
             }
         }
-        if (!passwords.ContainsKey(username)) {
+        if (!passwords.TryGetValue(username, out var storedHash)) {
             return AuthenticationStatus.WrongUsername;
         }
-        if (passwords[username] != passwordHash) {
+        if (!VerifyPasswordPBKDF2(password, storedHash)) {
             return AuthenticationStatus.WrongPassword;
         }
         return AuthenticationStatus.Success;

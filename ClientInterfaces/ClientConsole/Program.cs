@@ -3,6 +3,7 @@ using System;
 using System.Text;
 using static Common.Utility;
 using ClientApp;
+using System.Net.Security;
 
 class Program {
 
@@ -10,10 +11,37 @@ class Program {
     //TODO: Figure out why voice command triggers the SocketException every time
 
     static async Task Main(string[] args) {
+        // === Connection Setup ===
         Console.Write("Enter server host or press Enter for this device's IP: ");
         string host = Console.ReadLine();
         if (string.IsNullOrWhiteSpace(host)) {
             host = GetLocalIP();
+        }
+
+        int port = 11111;
+        var portEnv = Environment.GetEnvironmentVariable("APP_PORT");
+        if (!string.IsNullOrWhiteSpace(portEnv) && int.TryParse(portEnv, out var parsedPort)) {
+            port = parsedPort;
+        }
+
+        var client = new Client();
+        //Wires all the console logs to the events
+        InitEvents(client);
+        Console.WriteLine($"Connecting to server at {host}:{port}");
+        await client.ConnectAsync(host, port);
+
+        // === Login Setup ===
+        if (client._stream is not SslStream) {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write("Only login over an unencrypted connection in a dev environment, otherwise password details can be sniffed by attackers. " +
+                "Continue to login on unencrypted connection? [y/n]: ");
+            Console.ResetColor();
+            var key = Console.ReadKey(intercept: true);
+            Console.WriteLine(key.KeyChar);
+            if (key.KeyChar != 'y' && key.KeyChar != 'Y') {
+                Console.WriteLine("Exiting...");
+                return;
+            }
         }
         string username = "";
         string password = "";
@@ -21,19 +49,8 @@ class Program {
         username = Console.ReadLine() ?? "Client";
         Console.Write("Password: ");
         password = ReadPassword();
-        var hash = SHA256Hash(password);
 
-        int port = 11111;
-        var portEnv = Environment.GetEnvironmentVariable("APP_PORT");
-        if (!string.IsNullOrWhiteSpace(portEnv) && int.TryParse(portEnv, out var parsedPort)) {
-            port = parsedPort;
-        }
-        var client = new Client();
-        //Wires all the console logs to the events
-        InitEvents(client);
-        client.Initialize(host, port);
-        Console.WriteLine($"Connecting to server at {host}:{port}...");
-        await client.ConnectAsync(username, hash);
+        await client.LoginAsync(username, password);
 
         Console.Title = client.Name;
 

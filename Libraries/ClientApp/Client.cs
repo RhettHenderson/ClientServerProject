@@ -26,7 +26,7 @@ public class Client : IAsyncDisposable {
 
     // === Public Properties ===
     public string? Name { get; private set; }
-    public Stream? _stream { get; set; }
+    public Stream? _stream { get; private set; }
     public IPEndPoint? LocalEndPoint { get; private set; }
     public string PlatformName { get; } = Utility.GetPlatformName();
     // === Dictionaries / State ===
@@ -49,16 +49,13 @@ public class Client : IAsyncDisposable {
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
     // === Main Client Logic ===
-    public void Initialize(string host, int port) {
+    public async Task ConnectAsync(string host, int port) {
         var ip = IPAddress.TryParse(host, out var ipAddr) ? ipAddr : IPAddress.Loopback;
         serverIp = ip;
         serverPort = port;
         socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-
         LocalEndPoint = (IPEndPoint?)socket.LocalEndPoint;
-    }
 
-    public async Task ConnectAsync(string name, string? passwordHash) {
         await socket.ConnectAsync(new IPEndPoint(serverIp, serverPort));
         net = new NetworkStream(socket, ownsSocket: true);
         stream = net;
@@ -89,17 +86,20 @@ public class Client : IAsyncDisposable {
 
         //Store it in a global so we can dispose it later
         _stream = stream;
-        Name = name;
 
+        //Go ahead and start the receive loop so we can receive any auth error packets
         _ = Task.Run(() => ReceiveLoopAsync(stream));
+    }
 
+    public async Task LoginAsync(string name, string? password) {
+        Name = name;
         Packet authPacket = new Packet {
             ClientID = name,
             Headers = new Dictionary<string, string>
             {
                 { "Type", "Auth" }
             },
-            Payload = Encoding.UTF8.GetBytes(passwordHash ?? "")
+            Payload = Encoding.UTF8.GetBytes(password ?? "")
         };
         await PacketIO.SendPacketAsync(stream, authPacket);
     }
@@ -170,17 +170,18 @@ public class Client : IAsyncDisposable {
                             Disconnected?.Invoke();
                             stream.Dispose();
                             return;
+                        case "AuthSuccess":
+                            // Fire the notification
+                            Notification?.Invoke(NotificationType.Info, "Successfully logged in.");
+                            break;
                         case ("FileStart"):
                             await FileTransfer.HandleFileStartAsync(stream, packet, files, Name, defaultSaveDir);
-                            //Event for file received
                             break;
                         case ("FileChunk"):
                             await FileTransfer.HandleFileChunkAsync(packet, files);
-                            //Event for file chunk
                             break;
                         case ("FileEnd"):
                             await FileTransfer.HandleFileEndAsync(stream, packet, files, Name);
-                            //Event for file end
                             break;
                         case ("Disconnect"):
                             var message = text.Length > 0 ? text : "Remote requested UDP disconnect.";
