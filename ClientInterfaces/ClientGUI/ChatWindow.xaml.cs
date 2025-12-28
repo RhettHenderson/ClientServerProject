@@ -1,35 +1,117 @@
+// ChatWindow.xaml.cs
 using ClientApp;
 using Common;
 using Microsoft.Win32;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 
 namespace ClientGUI;
 
 public partial class ChatWindow : Window {
     private readonly Client _client;
+
     private bool hasAttachment;
     private string attachmentPath;
 
-    public ChatWindow(Client client) {
+    private const string RoomKey = "__ROOM__";
+    private string _activeConversationKey = RoomKey;
+
+    private readonly ObservableCollection<UserListItem> _users = new();
+    private readonly Dictionary<string, ObservableCollection<string>> _histories =
+        new(System.StringComparer.OrdinalIgnoreCase);
+
+    private sealed class UserListItem {
+        public string Key { get; }
+        public string DisplayName { get; }
+        public bool IsRoom => Key == RoomKey;
+
+        public UserListItem(string key, string displayName) {
+            Key = key;
+            DisplayName = displayName;
+        }
+    }
+
+    public ChatWindow(Client client, string serverIP) {
         InitializeComponent();
+
         _client = client;
         _client.MessageReceived += Client_MessageReceived;
+        _client.ClientsUpdated += roster => {
+            Dispatcher.BeginInvoke(() => UpdateConnectedUsers(roster.ToArray()));
+        };
+        _client.WhisperReceived += Client_WhisperReceived;
+        _client.Error += (msg) => {
+            Dispatcher.BeginInvoke(() => {
+                MessageBox.Show(this, msg, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            });
+        };
 
-        HeaderText.Text = $"Logged in as {_client.Name} | Server: {_client?.LocalEndPoint}";
+        // Users list UI
+        UsersListBox.ItemsSource = _users;
+
+        // Always keep Room at top
+        _users.Add(new UserListItem(RoomKey, "Room"));
+        EnsureHistory(RoomKey);
+        UpdateConnectedUsers(_client.ConnectedClients);
+        // Default to room
+        UsersListBox.SelectedIndex = 0;
+        SwitchConversation(RoomKey);
+
+        HeaderText.Text = $"Logged in as {_client.Name} | Server: {serverIP}";
         MessageTextBox.Focus();
     }
 
+    private void UsersListBox_SelectionChanged(object sender, SelectionChangedEventArgs e) {
+        if (UsersListBox.SelectedItem is not UserListItem item)
+            return;
+
+        SwitchConversation(item.Key);
+    }
+
+    private void SwitchConversation(string key) {
+        _activeConversationKey = key;
+        EnsureHistory(key);
+
+        MessagesListBox.ItemsSource = _histories[key];
+
+        if (key == RoomKey) {
+            ConversationText.Text = "Room";
+            MessageTextBox.Tag = "Enter a message...";
+        }
+        else {
+            ConversationText.Text = $"Whisper: {key}";
+            MessageTextBox.Tag = $"Whisper to {key}...";
+        }
+
+        // Attachments only allowed in Room for now (client -> server)
+        bool inRoom = (key == RoomKey);
+        AttachButton.Opacity = inRoom ? 1.0 : 0.55;
+        AttachButton.ToolTip = inRoom
+            ? "Attach a file (sends to server)"
+            : "Attachments are only supported in Room for now";
+        AttachButton.IsEnabled = inRoom;
+        //Remove attachment if switching out of room
+        if (!inRoom)
+            RemoveAttachment_Click(this, new RoutedEventArgs());
+
+        ScrollToBottom();
+        MessageTextBox.Focus();
+    }
 
     private async void MessageTextBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e) {
         if (e.Key == System.Windows.Input.Key.Enter) {
+            e.Handled = true;
             await SendCurrentAsync();
         }
     }
+
     private async void Send_Click(object sender, RoutedEventArgs e) {
         await SendCurrentAsync();
     }
 
+    // NOTE: Attach_Click remains for your future re-enable work; attach button is disabled in XAML for now.
     private void Attach_Click(object sender, RoutedEventArgs e) {
         var dlg = new OpenFileDialog {
             Title = "Select a file to attach",
@@ -57,41 +139,160 @@ public partial class ChatWindow : Window {
         AttachmentBanner.Visibility = Visibility.Collapsed;
     }
 
-    private async Task SendCurrentAsync() {
+    private async System.Threading.Tasks.Task SendCurrentAsync() {
         // If a file is attached, send it
         if (hasAttachment && !string.IsNullOrWhiteSpace(attachmentPath)) {
-            await FileTransfer.SendFileAsync(_client._stream, attachmentPath, _client.pendingResponses);
+            if (_activeConversationKey == RoomKey) {
+                // Current implementation: client -> server file transfer (kept the same)
+                await FileTransfer.SendFileAsync(_client._stream, attachmentPath, _client.pendingResponses);
 
-            // show something in history if you want
-            MessagesListBox.Items.Add($"(file) You: {Path.GetFileName(attachmentPath)}");
-            MessagesListBox.ScrollIntoView(MessagesListBox.Items[^1]);
+                AddToHistory(RoomKey, $"(file) You: {Path.GetFileName(attachmentPath)}");
 
-            // clear attachment state
-            RemoveAttachment_Click(this, new RoutedEventArgs());
+                // clear attachment state
+                RemoveAttachment_Click(this, new RoutedEventArgs());
+            }
+            else {
+                // TODO: client-to-client file sending not implemented yet.
+            }
         }
 
-        // Send the typed message (optional)
         string message = MessageTextBox.Text.Trim();
-        if (!string.IsNullOrWhiteSpace(message)) {
-            await _client.SendMessageAsync(message);
-            MessagesListBox.Items.Add($"You: {message}");
-            MessagesListBox.ScrollIntoView(MessagesListBox.Items[^1]);
+        if (string.IsNullOrWhiteSpace(message))
+            return;
 
-            MessageTextBox.Clear();
-            MessageTextBox.Focus();
+        if (_activeConversationKey == RoomKey) {
+            await _client.SendMessageAsync(message);
+            AddToHistory(RoomKey, $"You: {message}");
+        }
+        else {
+            string targetUser = _activeConversationKey;
+            await _client.SendWhisperAsync(targetUser, message);
+            AddToHistory(targetUser, $"You: {message}");
+
+            // When you message a user, move them to the top (below Room)
+            BumpUserToTop(targetUser);
         }
 
+        MessageTextBox.Clear();
+        MessageTextBox.Focus();
     }
 
     private void Client_MessageReceived(string sender, string text) {
         Dispatcher.BeginInvoke(() => {
-            AddToHistory($"{sender}: {text}");
+            AddToHistory(RoomKey, $"{sender}: {text}");
         });
     }
 
-    private void AddToHistory(string line) {
-        MessagesListBox.Items.Add(line);
-        MessagesListBox.ScrollIntoView(MessagesListBox.Items[^1]);
+    private void Client_WhisperReceived(string sender, string text) {
+        Dispatcher.BeginInvoke(() => {
+            EnsureUserExists(sender);
+            AddToHistory(sender, $"{sender}: {text}");
+        });
+    }
+
+    private void UpdateConnectedUsers(IEnumerable<ClientInfo> rosterInServerOrder) {
+        // Normalize + remove self
+        var incoming = rosterInServerOrder
+            .Where(ci => ci is not null)
+            .Where(ci => !string.IsNullOrWhiteSpace(ci.Name))
+            .Where(ci => !string.Equals(ci.Name, _client.Name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        // Track incoming names
+        var incomingByName = incoming.ToDictionary(ci => ci.Name, ci => ci, StringComparer.OrdinalIgnoreCase);
+        var incomingNames = new HashSet<string>(incomingByName.Keys, StringComparer.OrdinalIgnoreCase);
+
+        // 1) Remove users no longer present (keep Room pinned)
+        for (int i = _users.Count - 1; i >= 0; i--) {
+            if (_users[i].IsRoom)
+                continue;
+
+            if (!incomingNames.Contains(_users[i].Key))
+                _users.RemoveAt(i);
+        }
+
+        // 2) Update display for users that still exist (optional; keeps list order)
+        // If you only show Name, you can set display = info.Name.
+        for (int i = 0; i < _users.Count; i++) {
+            var u = _users[i];
+            if (u.IsRoom) continue;
+
+            if (incomingByName.TryGetValue(u.Key, out var info)) {
+                // Choose how you want to show them:
+                // string display = info.Name;
+                string display = string.IsNullOrWhiteSpace(info.Platform)
+                    ? info.Name
+                    : $"{info.Name} ({info.Platform})";
+
+                if (!string.Equals(u.DisplayName, display, StringComparison.Ordinal))
+                    _users[i] = new UserListItem(u.Key, display); // replace in-place, no reordering
+
+                EnsureHistory(u.Key);
+            }
+        }
+
+        // 3) Append brand-new users in server-provided order
+        foreach (var info in incoming) {
+            if (_users.Any(u => string.Equals(u.Key, info.Name, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            string display = string.IsNullOrWhiteSpace(info.Platform)
+                ? info.Name
+                : $"{info.Name} ({info.Platform})";
+
+            _users.Add(new UserListItem(info.Name, display));
+            EnsureHistory(info.Name);
+        }
+
+        // 4) If currently whispering to someone who disappeared, fall back to Room
+        if (_activeConversationKey != RoomKey &&
+            !_users.Any(u => string.Equals(u.Key, _activeConversationKey, StringComparison.OrdinalIgnoreCase))) {
+            UsersListBox.SelectedIndex = 0;
+        }
+    }
+
+    private void EnsureUserExists(string user) {
+        if (_users.Any(x => x.IsRoom == false && string.Equals(x.Key, user, System.StringComparison.OrdinalIgnoreCase)))
+            return;
+
+        _users.Add(new UserListItem(user, user));
+        EnsureHistory(user);
+    }
+
+    private void BumpUserToTop(string user) {
+        var item = _users.FirstOrDefault(x =>
+            !x.IsRoom && string.Equals(x.Key, user, System.StringComparison.OrdinalIgnoreCase));
+
+        if (item is null)
+            return;
+
+        int idx = _users.IndexOf(item);
+        if (idx <= 1) // already at top (below Room)
+            return;
+
+        _users.Move(idx, 1);
+    }
+
+    private void EnsureHistory(string key) {
+        if (!_histories.ContainsKey(key))
+            _histories[key] = new ObservableCollection<string>();
+    }
+
+    private void AddToHistory(string conversationKey, string line) {
+        EnsureHistory(conversationKey);
+        _histories[conversationKey].Add(line);
+
+        // If we're currently viewing this conversation, keep it scrolled
+        if (string.Equals(_activeConversationKey, conversationKey, System.StringComparison.OrdinalIgnoreCase)) {
+            ScrollToBottom();
+        }
+    }
+
+    private void ScrollToBottom() {
+        if (MessagesListBox.ItemsSource is not ObservableCollection<string> src || src.Count == 0)
+            return;
+
+        MessagesListBox.ScrollIntoView(src[src.Count - 1]);
     }
 
     private void TitleBar_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e) {

@@ -25,7 +25,7 @@ public partial class LoginWindow : Window {
 
         await _client.LoginAsync(username, password);
 
-        var chat = new ChatWindow(_client);
+        var chat = new ChatWindow(_client, _serverIp);
         //Set the chat to the main window so the app closes when it is closed
         Application.Current.MainWindow = chat;
         chat.Show();
