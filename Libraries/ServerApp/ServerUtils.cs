@@ -1,6 +1,9 @@
+using Common;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.Json;
 
 namespace ServerApp;
 
@@ -61,5 +64,24 @@ internal static class ServerUtils {
             ?? throw new InvalidOperationException("Certificate with specified thumbprint not found.");
         }
         return cert;
+    }
+
+    internal static async Task<Packet> GetClientRoster(
+    ConcurrentDictionary<string, int> names,
+    ConcurrentDictionary<int, string> clientPlatforms) {
+        var roster = names.Select(kvp => {
+            int id = kvp.Value;
+            return new ClientInfo {
+                Id = id,
+                Name = kvp.Key,
+                Platform = clientPlatforms.TryGetValue(id, out var p) ? p : "Unknown"
+            };
+        }).ToArray();
+
+        return new Packet {
+            ClientID = "Server",
+            Headers = new Dictionary<string, string> { { "Type", "ClientList" } },
+            Payload = JsonSerializer.SerializeToUtf8Bytes(roster, CommonJsonContext.Default.ClientInfoArray)
+        };
     }
 }

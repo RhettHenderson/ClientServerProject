@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Text;
 using System.Text.Json.Serialization;
 
 namespace Common;
@@ -25,5 +22,7 @@ public enum PacketStatus {
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(byte[]))]
+[JsonSerializable(typeof(ClientInfo))]
+[JsonSerializable(typeof(ClientInfo[]))]
 public partial class CommonJsonContext : JsonSerializerContext {
 }

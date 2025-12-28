@@ -1,6 +1,4 @@
 using Common;
-using static Common.Utility;
-using static ServerApp.ServerUtils;
 using Syroot.Windows.IO;
 using System.Collections.Concurrent;
 using System.Net;
@@ -9,6 +7,8 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Text;
 using System.Text.Json;
+using static Common.Utility;
+using static ServerApp.ServerUtils;
 
 namespace ServerApp;
 
@@ -186,7 +186,8 @@ public class Server : IAsyncDisposable {
         }
         if (status == PacketStatus.Disconnected) {
             Notification?.Invoke(NotificationType.Warning, $"Client {id} forcibly disconnected");
-            auth.RemoveClient(id);
+            await auth.RemoveClient(id);
+            await BroadcastAsync(GetClientRoster(names, clientPlatforms).Result);
             return false;
         }
         else if (status == PacketStatus.Error) {
@@ -232,40 +233,25 @@ public class Server : IAsyncDisposable {
                         return true;
 
                     case "whisper":
-                    case "w":
-                        string[] args = text.Split(" ");
-                        if (args.Length < 3) {
-                            reply.Payload = Encoding.ASCII.GetBytes("Usage: --whisper <ID> <message>");
-                            await PacketIO.SendPacketAsync(conn.io, reply);
-                            return true;
-                        }
-                        //Step 1: Check if the user used ID or name
-                        //Step 2: If using ID, no changes made. If using name, look up ID
-                        //Step 3: Check if ID exists
-                        //Step 4: Send message if it does, error if it doesn't
-                        if (!int.TryParse(args[1], out int targetID)) {
-                            //User used a name instead of an ID
-                            if (!names.ContainsKey(args[1])) {
-                                reply.Payload = Encoding.ASCII.GetBytes($"User with name {args[1]} not found.");
+                    case "w": {
+                            string[] args = text.Split(" ");
+                            if (args.Length < 3) {
+                                reply.Payload = Encoding.UTF8.GetBytes("Usage: --whisper <Name> <message>");
                                 await PacketIO.SendPacketAsync(conn.io, reply);
                                 return true;
                             }
-                            //Name exists, get ID
-                            targetID = names[args[1]];
-                        }
-                        if (!clients.ContainsKey(targetID)) {
-                            reply.Payload = Encoding.ASCII.GetBytes($"User with ID {targetID} not found.");
-                            await PacketIO.SendPacketAsync(conn.io, reply);
+
+                            string recipientName = args[1];
+                            if (int.TryParse(args[1], out var targetIdFromUser)) {
+                                reply.Payload = Encoding.UTF8.GetBytes("Please whisper by name: --whisper <Name> <message>");
+                                await PacketIO.SendPacketAsync(conn.io, reply);
+                                return true;
+                            }
+
+                            string msg = string.Join(" ", args, 2, args.Length - 2);
+                            await SendWhisperAsync(id, clientID, recipientName, msg);
                             return true;
                         }
-                        string msg = string.Join(" ", args, 2, args.Length - 2);
-                        Packet whisper = new Packet {
-                            ClientID = clientID,
-                            Headers = new Dictionary<string, string> { { "Type", "Whisper" } },
-                            Payload = Encoding.ASCII.GetBytes($"{msg}")
-                        };
-                        await PacketIO.SendPacketAsync(clients[targetID].io, whisper);
-                        return true;
                     case "create":
                         return true;
                     default:
@@ -363,9 +349,6 @@ public class Server : IAsyncDisposable {
                 Notification?.Invoke(NotificationType.Info, $"Received ACK from client {id}.");
                 //Sets the client's name
                 names[clientID] = id;
-                if (headers.TryGetValue("Platform", out var platform)) {
-                    clientPlatforms[id] = platform;
-                }
                 return true;
             case "Auth":
                 //Authentication packet containing the client's password
@@ -373,29 +356,34 @@ public class Server : IAsyncDisposable {
                     case ServerAuth.AuthenticationStatus.Success:
                         Notification?.Invoke(NotificationType.Info, $"Client {id} authenticated successfully as {clientID}.");
                         names[clientID] = id;
+                        if (headers.TryGetValue("Platform", out var platform)) {
+                            clientPlatforms[id] = platform;
+                        }
                         await SendInitialPackets(conn.io, id);
                         Notification?.Invoke(NotificationType.Info, $"Client {id} is now connected.");
+                        //Update all clients' client rosters
+                        await BroadcastAsync(GetClientRoster(names, clientPlatforms).Result);
                         return true;
                     case ServerAuth.AuthenticationStatus.WrongPassword:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} used the wrong password. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
                         reply.Payload = Encoding.UTF8.GetBytes("Incorrect password.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        auth.RemoveClient(id);
+                        await auth.RemoveClient(id);
                         return false;
                     case ServerAuth.AuthenticationStatus.WrongUsername:
                         Notification?.Invoke(NotificationType.Warning, $"Client {id} tried to login as non-existent user {clientID}. Closing connection.");
                         reply.Headers["Type"] = "AuthFailure";
                         reply.Payload = Encoding.UTF8.GetBytes("No account with that username exists.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        auth.RemoveClient(id);
+                        await auth.RemoveClient(id);
                         return false;
                     case ServerAuth.AuthenticationStatus.AlreadyLoggedIn:
                         Notification?.Invoke(NotificationType.Warning, $"User {clientID} is already logged in. Rejecting client {id}.");
                         reply.Headers["Type"] = "AuthFailure";
                         reply.Payload = Encoding.UTF8.GetBytes("Another user is already logged in with that account.");
                         await PacketIO.SendPacketAsync(conn.io, reply);
-                        auth.RemoveClient(id);
+                        await auth.RemoveClient(id);
                         return false;
                     default:
                         break;
@@ -446,6 +434,20 @@ public class Server : IAsyncDisposable {
                 Notification?.Invoke(NotificationType.Warning, $"Client {clientID} requested UDP disconnect.");
                 vc.CloseUdpConnection();
                 return true;
+            case "Whisper": {
+                    if (!headers.TryGetValue("Recipient", out var recipient) || string.IsNullOrWhiteSpace(recipient)) {
+                        var fail = new Packet {
+                            ClientID = "Server",
+                            Headers = new Dictionary<string, string> { { "Type", "Message" } },
+                            Payload = Encoding.UTF8.GetBytes("Whisper missing Recipient header.")
+                        };
+                        await PacketIO.SendPacketAsync(conn.io, fail);
+                        return true;
+                    }
+
+                    await SendWhisperAsync(id, clientID, recipient, text);
+                    return true;
+                }
             default:
                 Notification?.Invoke(NotificationType.Warning, $"Invalid packet header: {type}.");
                 break;
@@ -463,6 +465,34 @@ public class Server : IAsyncDisposable {
             await PacketIO.SendPacketAsync(currClient.Value.io, packet);
         }
     }
+
+    private static async Task SendWhisperAsync(int senderId, string senderName, string recipientName, string message) {
+        if (!names.TryGetValue(recipientName, out var targetId) || !clients.ContainsKey(targetId)) {
+            // Tell sender it failed (so CLI user sees something)
+            var fail = new Packet {
+                ClientID = "Server",
+                Headers = new Dictionary<string, string> { { "Type", "Message" } },
+                Payload = Encoding.UTF8.GetBytes($"User '{recipientName}' is not connected.")
+            };
+            await PacketIO.SendPacketAsync(clients[senderId].io, fail);
+            return;
+        }
+
+        var pkt = new Packet {
+            ClientID = senderName,
+            Headers = new Dictionary<string, string>
+            {
+            { "Type", "Whisper" },
+            { "Sender", senderName },
+            { "Recipient", recipientName }
+        },
+            Payload = Encoding.UTF8.GetBytes(message)
+        };
+
+        await PacketIO.SendPacketAsync(clients[targetId].io, pkt);
+
+    }
+
 
     private async Task SendInitialPackets(Stream stream, int id) {
         Packet pkt = new Packet {
@@ -549,6 +579,8 @@ public class Server : IAsyncDisposable {
                 }
                 var name = args[0];
                 await auth.RemoveClient(name);
+                //Update the other clients' client roster
+                await BroadcastAsync(GetClientRoster(names, clientPlatforms).Result);
                 return;
             default:
                 Notification?.Invoke(NotificationType.Info, "Unknown command.");

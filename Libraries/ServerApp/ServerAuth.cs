@@ -1,9 +1,9 @@
-using Common;
 using System.Collections.Concurrent;
 using System.Text;
 using static Common.Utility;
 
 namespace ServerApp;
+
 internal class ServerAuth {
 
     // === ServerAuth-specific Fields ===
@@ -89,7 +89,7 @@ internal class ServerAuth {
 
     internal async Task RemoveClient(int id) {
         if (clients.TryRemove(id, out var conn)) {
-            try { conn.io.Dispose(); } catch { }
+            try { await conn.io.DisposeAsync(); } catch { }
             try { conn.socket.Dispose(); } catch { }
         }
 

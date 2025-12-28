@@ -1,5 +1,4 @@
 using Common;
-using static Common.Utility;
 using Syroot.Windows.IO;
 using System.Collections.Concurrent;
 using System.Net;
@@ -9,6 +8,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using static Common.Utility;
 
 namespace ClientApp;
 
@@ -31,6 +31,9 @@ public class Client : IAsyncDisposable {
     public string PlatformName { get; } = Utility.GetPlatformName();
     // === Dictionaries / State ===
     public ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses { get; } = new();
+    public IReadOnlyList<ClientInfo> ConnectedClients => connectedClients;
+    private ClientInfo[] connectedClients = [];
+
 
     // === Events (UI / CLI) ===
     public event Action<string, string>? MessageReceived;      // (from, text)
@@ -40,6 +43,7 @@ public class Client : IAsyncDisposable {
     public event Action? Disconnected;
     public event Action<string>? Error;
     public event Action<NotificationType, string>? Notification;
+    public event Action<ClientInfo[]>? ClientsUpdated;
 
     internal VoiceSessionManager session;
     internal Socket socket;
@@ -97,7 +101,8 @@ public class Client : IAsyncDisposable {
             ClientID = name,
             Headers = new Dictionary<string, string>
             {
-                { "Type", "Auth" }
+                { "Type", "Auth" },
+                { "Platform", PlatformName }
             },
             Payload = Encoding.UTF8.GetBytes(password ?? "")
         };
@@ -130,9 +135,6 @@ public class Client : IAsyncDisposable {
                         case ("VoiceInviteExpired"):
                             Notification?.Invoke(NotificationType.Warning, "Voice invite expired before it was accepted.");
                             break;
-                        case ("Whisper"):
-                            WhisperReceived?.Invoke(packet.ClientID, text);
-                            break;
                         //Data type tells the client to update some value
                         case ("Data"):
                             var variable = headers["Var"];
@@ -147,8 +149,7 @@ public class Client : IAsyncDisposable {
                                     ClientID = Name,
                                     Headers = new Dictionary<string, string>
                                 {
-                                    { "Type", "Ack" },
-                                    { "Platform", PlatformName }
+                                    { "Type", "Ack" }
                                 },
                                     Payload = Array.Empty<byte>()
                                 };
@@ -188,6 +189,16 @@ public class Client : IAsyncDisposable {
                             Notification?.Invoke(NotificationType.Warning, message);
                             session.CloseUdpConnection();
                             break;
+                        case ("ClientList"):
+                            var roster = JsonSerializer.Deserialize(packet.Payload, CommonJsonContext.Default.ClientInfoArray)
+                                ?? Array.Empty<ClientInfo>();
+                            connectedClients = roster;
+                            ClientsUpdated?.Invoke(connectedClients);
+                            break;
+                        case "Whisper":
+                            string sender = headers.TryGetValue("Sender", out var s) ? s : packet.ClientID;
+                            WhisperReceived?.Invoke(sender, text);
+                            break;
                         default:
                             Error?.Invoke($"Unknown packet type received: {type}");
                             break;
@@ -216,6 +227,23 @@ public class Client : IAsyncDisposable {
             Headers = new Dictionary<string, string> { { "Type", "Message" } },
             Payload = Encoding.UTF8.GetBytes(text)
         });
+    }
+
+    public async Task SendWhisperAsync(string recipientName, string message) {
+        if (_stream is null) throw new InvalidOperationException("Not connected.");
+        if (string.IsNullOrWhiteSpace(recipientName)) throw new ArgumentException("recipientName required.");
+
+        var pkt = new Packet {
+            ClientID = Name,
+            Headers = new Dictionary<string, string>
+            {
+            { "Type", "Whisper" },
+            { "Recipient", recipientName }
+        },
+            Payload = Encoding.UTF8.GetBytes(message)
+        };
+
+        await PacketIO.SendPacketAsync(_stream, pkt);
     }
 
     public async Task SendCommandAsync(string command) {
@@ -343,6 +371,18 @@ public class Client : IAsyncDisposable {
             case "dc":
                 await LeaveVoiceRoom($"{Name} left the voice room");
                 return;
+            case "whisper":
+            case "w":
+                //Send the full list of args as the message instead of just the first word
+                await SendWhisperAsync(args[0], string.Join(" ", args, 1, args.Length - 1));
+                break;
+            case "list-users":
+                StringBuilder sb = new StringBuilder("Connected Users:");
+                foreach (var client in connectedClients) {
+                    sb.Append($"\n-{client.Name}");
+                }
+                Notification?.Invoke(NotificationType.Info, sb.ToString());
+                break;
             default:
                 Notification?.Invoke(NotificationType.Warning, "Unknown command");
                 return;
