@@ -1,9 +1,7 @@
-using Common;
-using System;
-using System.Text;
-using static Common.Utility;
 using ClientApp;
 using System.Net.Security;
+using System.Text;
+using static Common.Utility;
 
 class Program {
 
@@ -61,7 +59,7 @@ class Program {
                 if (line.StartsWith("--")) {
                     await client.HandleClientCommandAsync(line[2..].Trim());
                 }
-                
+
                 else {
                     //Move cursor to start of line and add "You: "
                     var pos = Console.GetCursorPosition();
