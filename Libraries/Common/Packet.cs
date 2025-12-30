@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace Common;
 
 public class Packet {
-    public string ClientID { get; set; }
+    public string? ClientID { get; set; }
     public Dictionary<string, string> Headers { get; set; } = new();
     public byte[] Payload { get; set; } = Array.Empty<byte>();
 }

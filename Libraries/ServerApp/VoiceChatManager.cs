@@ -60,7 +60,7 @@ internal class VoiceChatManager {
                 Packet packet = PacketIO.DeserializeForUdp(buf.AsSpan(0, result.ReceivedBytes));
                 var from = (IPEndPoint)result.RemoteEndPoint;
 
-                var senderId = ResolveClientId(packet.ClientID);
+                var senderId = ResolveClientId(packet.ClientID is not null ? packet.ClientID : "Unknown");
                 if (senderId >= 0) {
                     udpClients[senderId] = from;
                 }

@@ -28,6 +28,9 @@ public static class PacketIO {
 
         bw.Write((byte)0x55); //Magic byte 'U' for UDP
 
+        if (packet.ClientID == null) {
+            packet.ClientID = "Unknown";
+        }
         bw.Write((ushort)packet.ClientID.Length);
         bw.Write(Encoding.UTF8.GetBytes(packet.ClientID));
 
@@ -138,7 +141,7 @@ public static class PacketIO {
         }
 
     }
-    public static async Task<(PacketStatus status, Packet packet)> ReceivePacketAsync(Stream stream) {
+    public static async Task<(PacketStatus status, Packet? packet)> ReceivePacketAsync(Stream stream) {
         byte[] lenBuf = new byte[4];
         var received = await ReceiveExactlyAsync(stream, lenBuf);
         if (received == PacketStatus.Disconnected) {

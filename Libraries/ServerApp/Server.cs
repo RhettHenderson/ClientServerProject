@@ -14,7 +14,7 @@ namespace ServerApp;
 
 public class Server : IAsyncDisposable {
     // === Networking ===
-    private Socket listener;
+    private Socket? listener;
     private static string Name = "Server";
 
     // === Connection Handling ===
@@ -37,7 +37,7 @@ public class Server : IAsyncDisposable {
     private int reconnectingID = 0;
 
     // === File I/O ===
-    private static Stream _stream = null;
+    private static Stream? _stream = null;
     private string defaultSaveDir = "";
 
     // === Commands & Misc ===
@@ -47,35 +47,18 @@ public class Server : IAsyncDisposable {
     public IPAddress? listeningIp { get; private set; }
     public int listeningPort { get; private set; }
 
-    private ServerAuth auth;
-    private VoiceChatManager vc;
+    private ServerAuth? auth;
+    private VoiceChatManager? vc;
 
     // === Events and Actions ===
     public event Action<string, string>? WhisperReceived;   // (from, text)
     public event Action<string>? Error;
     public event Action<NotificationType, string>? Notification;
-    public event Action<string, string> MessageReceived;    // (from, text)
+    public event Action<string, string>? MessageReceived;    // (from, text)
 
-    public void Initialize(int port) {
+    public void Initialize(int port, string ip = "127.0.0.1") {
         listeningPort = port;
         Console.Title = "Server";
-        InitListener(GetLocalIP());
-        this.vc = new VoiceChatManager(listeningIp, listeningPort, names, clients, Notification, Name);
-        this.auth = new ServerAuth(Notification, names, clients, this.vc, clientPlatforms);
-        auth.Load();
-        try {
-            defaultSaveDir = KnownFolders.Downloads.Path;
-        }
-        catch (Exception e) {
-            defaultSaveDir = "/downloads";
-        }
-    }
-
-    // === Main Server Loop ===
-    public async Task Start() {
-        await AcceptLoopAsync();
-    }
-    public void InitListener(string ip) {
         IPAddress ipAddr;
         if (ip == "") {
             ipAddr = IPAddress.Loopback; //127.0.0.1
@@ -95,6 +78,22 @@ public class Server : IAsyncDisposable {
         listener = new Socket(ipAddr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         listener.Bind(localEndPoint);
         listener.Listen(10);
+
+        if (Notification is null) throw new InvalidOperationException("Notification event must be set before initializing the server.");
+        this.vc = new VoiceChatManager(listeningIp, listeningPort, names, clients, Notification, Name);
+        this.auth = new ServerAuth(Notification, names, clients, this.vc, clientPlatforms);
+        auth.Load();
+        try {
+            defaultSaveDir = KnownFolders.Downloads.Path;
+        }
+        catch {
+            defaultSaveDir = "/downloads";
+        }
+    }
+
+    // === Main Server Loop ===
+    public async Task Start() {
+        await AcceptLoopAsync();
     }
 
 
@@ -109,12 +108,13 @@ public class Server : IAsyncDisposable {
             Error?.Invoke("Server is shutting down.");
         }
         finally {
-            try { listener.Close(); } catch { }
+            if (listener is not null) try { listener.Close(); } catch { }
         }
     }
 
     public async Task<int> WaitForConnectionAsync() {
         Notification?.Invoke(NotificationType.Info, "Waiting for connection...");
+        if (listener is null) throw new InvalidOperationException("Listener socket is not initialized. Call Initialize first.");
         Socket client = await listener.AcceptAsync();
         int id = Interlocked.Increment(ref nextID);
         Notification?.Invoke(NotificationType.Info, $"Client #{id} initiated handshake.");
@@ -174,9 +174,11 @@ public class Server : IAsyncDisposable {
     }
 
     public async Task<bool> ProcessPacketAsync(int id) {
+        if (auth is null) throw new InvalidOperationException("ServerAuth is not initialized. Call Initialize first.");
+        if (vc is null) throw new InvalidOperationException("Voice chat manager is null. Call Initialize first.");
         var conn = clients[id];
         PacketStatus status;
-        Packet incoming = null;
+        Packet? incoming = null;
         try {
             var (s, i) = await PacketIO.ReceivePacketAsync(conn.io);
             status = s;
@@ -193,7 +195,12 @@ public class Server : IAsyncDisposable {
         }
         else if (status == PacketStatus.Error) {
             Error?.Invoke("An error occured trying to receive the last packet. Closing connection.");
-            auth.RemoveClient(id);
+            await auth.RemoveClient(id);
+            return false;
+        }
+        if (incoming is null) {
+            Error?.Invoke("Incoming packet is null. Closing connection.");
+            await auth.RemoveClient(id);
             return false;
         }
         //if we reach here status is Ok
@@ -234,7 +241,7 @@ public class Server : IAsyncDisposable {
         }
         switch (type) {
             case ("Message"):
-                MessageReceived?.Invoke(clientID, text);
+                MessageReceived?.Invoke(clientID is not null ? clientID : "Unknown", text);
                 await BroadcastAsync(incoming, id);
                 return true;
             case ("Command"):
@@ -265,7 +272,7 @@ public class Server : IAsyncDisposable {
                             }
 
                             string msg = string.Join(" ", args, 2, args.Length - 2);
-                            await SendWhisperAsync(id, clientID, recipientName, msg);
+                            await SendWhisperAsync(id, clientID is not null ? clientID : "Unknown", recipientName, msg);
                             return true;
                         }
                     case "create":
@@ -364,13 +371,21 @@ public class Server : IAsyncDisposable {
             case "Ack":
                 Notification?.Invoke(NotificationType.Info, $"Received ACK from client {id}.");
                 //Sets the client's name
+                if (clientID is null) {
+                    Notification?.Invoke(NotificationType.Warning, $"Warning: Ack from client {id} was malformed and missing clientID value.");
+                    return true;
+                }
                 names[clientID] = id;
                 return true;
             case "Auth":
                 //Authentication packet containing the client's password
-                switch (await auth.AuthenticateClient(clientID, text, id)) {
+                switch (await auth.AuthenticateClient(clientID is not null ? clientID : "Unknown", text, id)) {
                     case ServerAuth.AuthenticationStatus.Success:
                         Notification?.Invoke(NotificationType.Info, $"Client {id} authenticated successfully as {clientID}.");
+                        if (clientID is null) {
+                            Notification?.Invoke(NotificationType.Warning, $"Warning: Ack from client {id} was malformed and missing clientID value.");
+                            return true;
+                        }
                         names[clientID] = id;
                         if (headers.TryGetValue("Platform", out var platform)) {
                             clientPlatforms[id] = platform;
@@ -432,7 +447,7 @@ public class Server : IAsyncDisposable {
 
                     // Stamp a TransferId so all subsequent packets can be routed.
                     headers["TransferId"] = transferId;
-                    headers["Sender"] = clientID;
+                    headers["Sender"] = clientID is not null ? clientID : "Unknown";
                     headers["Recipient"] = recipientName;
 
                     int recipientId = -1; // -1 means Server is recipient
@@ -545,6 +560,17 @@ public class Server : IAsyncDisposable {
                         return true;
                     }
 
+                    if (recipient.ToLower() == "server") {
+                        //If it's directed to the server then just invoke and return
+                        WhisperReceived?.Invoke(clientID is not null ? clientID : "Unknown", text);
+                        return true;
+                    }
+
+                    //Otherwise, forward it to recipient
+                    if (clientID is null) {
+                        Notification?.Invoke(NotificationType.Warning, "Warning: Cannot forward whisper because packet was malformed and missing ClientID.");
+                        return true;
+                    }
                     await SendWhisperAsync(id, clientID, recipient, text);
                     return true;
                 }
@@ -628,7 +654,8 @@ public class Server : IAsyncDisposable {
 
     public async Task HandleServerCommandAsync(string line) {
         if (line is null) return;
-
+        if (vc is null) throw new InvalidOperationException("Voice chat manager is null. Call Initialize first.");
+        if (auth is null) throw new InvalidOperationException("Auth is null. Call Initialize first.");
         var parts = line.Split(' ');
         var cmd = parts[0];
         var args = parts.Skip(1).ToArray();
@@ -688,6 +715,6 @@ public class Server : IAsyncDisposable {
     // === IDisposable Implementation ===
     public async ValueTask DisposeAsync() {
         try { _stream?.Dispose(); } catch { }
-        vc.StopServerMicrophone();
+        if (vc is not null) vc.StopServerMicrophone();
     }
 }

@@ -15,12 +15,10 @@ namespace ClientApp;
 public class Client : IAsyncDisposable {
     // === Static Fields ===
     private static readonly string defaultSaveDir = KnownFolders.Downloads.Path;
-    private static readonly ConcurrentDictionary<string, FileReceiveState> files = new(); // Current downloads in progress
 
     // === Instance Fields ===
     private int id = -1;
-    private bool userExists = false;
-    private string[] commands = Array.Empty<string>();
+    private readonly ConcurrentDictionary<string, FileReceiveState> files = new(); // Current downloads in progress
     private IPAddress? serverIp;
     private int serverPort;
 
@@ -28,7 +26,7 @@ public class Client : IAsyncDisposable {
     public string? Name { get; private set; }
     public Stream? _stream { get; private set; }
     public IPEndPoint? LocalEndPoint { get; private set; }
-    public string PlatformName { get; } = Utility.GetPlatformName();
+    public string PlatformName { get; } = GetPlatformName();
     // === Dictionaries / State ===
     public ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses { get; } = new();
     public IReadOnlyList<ClientInfo> ConnectedClients => connectedClients;
@@ -38,17 +36,14 @@ public class Client : IAsyncDisposable {
     // === Events (UI / CLI) ===
     public event Action<string, string>? MessageReceived;      // (from, text)
     public event Action<string, string>? WhisperReceived;      // (from, text)
-    public event Action<string[]>? CommandsReceived;
     public event Action<int>? IdAssigned;
     public event Action? Disconnected;
     public event Action<string>? Error;
     public event Action<NotificationType, string>? Notification;
     public event Action<ClientInfo[]>? ClientsUpdated;
 
-    internal VoiceSessionManager session;
-    internal Socket socket;
-    internal NetworkStream net;
-    internal Stream stream;
+    internal VoiceSessionManager? session;
+    internal Socket? socket;
 
     //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -58,11 +53,9 @@ public class Client : IAsyncDisposable {
         serverIp = ip;
         serverPort = port;
         socket = new Socket(ip.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-        LocalEndPoint = (IPEndPoint?)socket.LocalEndPoint;
-
         await socket.ConnectAsync(new IPEndPoint(serverIp, serverPort));
-        net = new NetworkStream(socket, ownsSocket: true);
-        stream = net;
+        LocalEndPoint = (IPEndPoint?)socket.LocalEndPoint;
+        var net = new NetworkStream(socket, ownsSocket: true);
         try {
             var ssl = new SslStream(net, leaveInnerStreamOpen: false,
                 userCertificateValidationCallback: (_, __, ___, ____) => true // DEV ONLY
@@ -74,25 +67,19 @@ public class Client : IAsyncDisposable {
                 CertificateRevocationCheckMode = X509RevocationMode.NoCheck
             });
 
-            stream = ssl;
+            _stream = ssl;
         }
         catch (Exception) {
             Notification?.Invoke(NotificationType.Warning, "SSL negotiation failed. Falling back to unencrypted connection.");
-
-            await stream.DisposeAsync();
             socket.Dispose();
-
             socket = new Socket(serverIp.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             await socket.ConnectAsync(new IPEndPoint(serverIp, serverPort));
             net = new NetworkStream(socket, ownsSocket: true);
-            stream = net;
+            _stream = net;
         }
 
-        //Store it in a global so we can dispose it later
-        _stream = stream;
-
         //Go ahead and start the receive loop so we can receive any auth error packets
-        _ = Task.Run(() => ReceiveLoopAsync(stream));
+        _ = Task.Run(() => ReceiveLoopAsync(_stream));
     }
 
     public async Task LoginAsync(string name, string? password) {
@@ -106,7 +93,7 @@ public class Client : IAsyncDisposable {
             },
             Payload = Encoding.UTF8.GetBytes(password ?? "")
         };
-        await PacketIO.SendPacketAsync(stream, authPacket);
+        await PacketIO.SendPacketAsync(StreamOrThrow(), authPacket);
     }
     public async Task ReceiveLoopAsync(Stream stream) {
         try {
@@ -116,35 +103,39 @@ public class Client : IAsyncDisposable {
                     var headers = packet.Headers;
                     var text = Encoding.UTF8.GetString(packet.Payload);
 
-var type = headers["Type"];
+                    var type = headers["Type"];
 
-// First, try file-correlated pending responses (prevents collisions for concurrent transfers).
-if (type == "FileStartAck"
-    && headers.TryGetValue("ClientNonce", out var nonce)
-    && pendingResponses.TryRemove($"FileStartAck:{nonce}", out var tcsStart)) {
-    tcsStart.TrySetResult(packet);
-    continue;
-}
-if (type == "FileEndAck"
-    && headers.TryGetValue("TransferId", out var tid)
-    && pendingResponses.TryRemove($"FileEndAck:{tid}", out var tcsEnd)) {
-    tcsEnd.TrySetResult(packet);
-    continue;
-}
+                    // First, try file-correlated pending responses (prevents collisions for concurrent transfers).
+                    if (type == "FileStartAck"
+                        && headers.TryGetValue("ClientNonce", out var nonce)
+                        && pendingResponses.TryRemove($"FileStartAck:{nonce}", out var tcsStart)) {
+                        tcsStart.TrySetResult(packet);
+                        continue;
+                    }
+                    if (type == "FileEndAck"
+                        && headers.TryGetValue("TransferId", out var tid)
+                        && pendingResponses.TryRemove($"FileEndAck:{tid}", out var tcsEnd)) {
+                        tcsEnd.TrySetResult(packet);
+                        continue;
+                    }
 
-// Fallback: type-based correlation (AuthStatus, etc.)
-if (pendingResponses.TryRemove(type, out var tcs)) {
-    tcs.TrySetResult(packet);
-    continue;
-}
+                    // Fallback: type-based correlation (AuthStatus, etc.)
+                    if (pendingResponses.TryRemove(type, out var tcs)) {
+                        tcs.TrySetResult(packet);
+                        continue;
+                    }
 
                     switch (type) {
                         case ("Message"):
                             if (text != "") {
-                                MessageReceived?.Invoke(packet.ClientID, text);
+                                MessageReceived?.Invoke(packet.ClientID is not null ? packet.ClientID : "Unknown", text);
                             }
                             break;
                         case ("VoiceAccepted"):
+                            if (session is null) {
+                                Notification?.Invoke(NotificationType.Warning, "Voice session closed before invite was accepted.");
+                                break;
+                            }
                             Notification?.Invoke(NotificationType.Info, "Voice invite accepted. Starting UDP connection.");
                             await session.StartUdpConnectionAsync();
                             break;
@@ -162,7 +153,7 @@ if (pendingResponses.TryRemove(type, out var tcs)) {
                                     IdAssigned?.Invoke(id);
                                 }
                                 Packet ack = new Packet {
-                                    ClientID = Name,
+                                    ClientID = NameOrThrow(),
                                     Headers = new Dictionary<string, string>
                                 {
                                     { "Type", "Ack" }
@@ -173,37 +164,30 @@ if (pendingResponses.TryRemove(type, out var tcs)) {
                                 await PacketIO.SendPacketAsync(stream, ack);
                                 break;
                             }
-
-
-                            else if (variable == "commands") {
-                                commands = JsonSerializer.Deserialize(packet.Payload, Common.CommonJsonContext.Default.StringArray) ?? Array.Empty<string>();
-                                CommandsReceived?.Invoke(commands);
-                                break;
-                            }
                             break;
 
                         case ("AuthFailure"):
                             Error?.Invoke(text);
                             Disconnected?.Invoke();
-                            stream.Dispose();
+                            await stream.DisposeAsync();
                             return;
                         case "AuthSuccess":
                             // Fire the notification
                             Notification?.Invoke(NotificationType.Info, "Successfully logged in.");
                             break;
                         case ("FileStart"):
-                            await FileTransfer.HandleFileStartAsync(stream, packet, files, Name, defaultSaveDir);
+                            await FileTransfer.HandleFileStartAsync(stream, packet, files, NameOrThrow(), defaultSaveDir);
                             break;
                         case ("FileChunk"):
                             await FileTransfer.HandleFileChunkAsync(packet, files);
                             break;
                         case ("FileEnd"):
-                            await FileTransfer.HandleFileEndAsync(stream, packet, files, Name);
+                            await FileTransfer.HandleFileEndAsync(stream, packet, files, NameOrThrow());
                             break;
                         case ("Disconnect"):
                             var message = text.Length > 0 ? text : "Remote requested UDP disconnect.";
                             Notification?.Invoke(NotificationType.Warning, message);
-                            session.CloseUdpConnection();
+                            if (session is not null) session.CloseUdpConnection();
                             break;
                         case ("ClientList"):
                             var roster = JsonSerializer.Deserialize(packet.Payload, CommonJsonContext.Default.ClientInfoArray)
@@ -212,7 +196,8 @@ if (pendingResponses.TryRemove(type, out var tcs)) {
                             ClientsUpdated?.Invoke(connectedClients);
                             break;
                         case "Whisper":
-                            string sender = headers.TryGetValue("Sender", out var s) ? s : packet.ClientID;
+                            //Ternary inside ternary is ehhh but it's whatever
+                            string sender = headers.TryGetValue("Sender", out var s) ? s : (packet.ClientID is not null ? packet.ClientID : "Unknown");
                             WhisperReceived?.Invoke(sender, text);
                             break;
                         default:
@@ -230,16 +215,14 @@ if (pendingResponses.TryRemove(type, out var tcs)) {
         }
         finally {
             Disconnected?.Invoke();
-            try { stream.Dispose(); } catch { }
+            try { await StreamOrThrow().DisposeAsync(); } catch { /* Ignore */ }
         }
     }
 
     // === Client-Exclusive Messaging Functions
     public async Task SendMessageAsync(string text) {
-        if (_stream is null) throw new InvalidOperationException("Not connected.");
-
-        await PacketIO.SendPacketAsync(_stream, new Packet {
-            ClientID = Name,
+        await PacketIO.SendPacketAsync(StreamOrThrow(), new Packet {
+            ClientID = NameOrThrow(),
             Headers = new Dictionary<string, string> { { "Type", "Message" } },
             Payload = Encoding.UTF8.GetBytes(text)
         });
@@ -250,7 +233,7 @@ if (pendingResponses.TryRemove(type, out var tcs)) {
         if (string.IsNullOrWhiteSpace(recipientName)) throw new ArgumentException("recipientName required.");
 
         var pkt = new Packet {
-            ClientID = Name,
+            ClientID = NameOrThrow(),
             Headers = new Dictionary<string, string>
             {
             { "Type", "Whisper" },
@@ -265,18 +248,22 @@ if (pendingResponses.TryRemove(type, out var tcs)) {
     public async Task SendCommandAsync(string command) {
         if (_stream is null) throw new InvalidOperationException("Not connected.");
         await PacketIO.SendPacketAsync(_stream, new Packet {
-            ClientID = Name,
+            ClientID = NameOrThrow(),
             Headers = new Dictionary<string, string> { { "Type", "Command" } },
             Payload = Encoding.UTF8.GetBytes(command)
         });
     }
 
     public async Task StartVoiceRoom(IEnumerable<string> invitees) {
-        session = new VoiceSessionManager(Notification, Name, PlatformName, stream, serverIp, serverPort);
+        if (serverIp is null) throw new InvalidOperationException("Not connected. Call ConnectAsync first.");
+        if (Notification is null) throw new InvalidOperationException("Notification event not set.");
+        session = new VoiceSessionManager(Notification, NameOrThrow(), PlatformName, StreamOrThrow(), serverIp, serverPort);
         await session.SendVoiceInviteAsync(invitees);
     }
 
     public async Task LeaveVoiceRoom(string message) {
+        //No need to throw we can just exit if we're not in a session
+        if (session is null) return;
         await session.SendDisconnectAsync(message);
         session = null;
     }
@@ -325,84 +312,83 @@ if (pendingResponses.TryRemove(type, out var tcs)) {
         var args = parts.Skip(1).ToArray();
         switch (cmd) {
             case "file": {
-    if (_stream is null) throw new InvalidOperationException("Not connected.");
+                    if (_stream is null) throw new InvalidOperationException("Not connected.");
 
-    string? recipientName = null;
-    string? localPath = null;
-    string? remoteFilename = null;
-    string? saveLocation = null;
+                    string? recipientName = null;
+                    string? localPath = null;
+                    string? remoteFilename = null;
+                    string? saveLocation = null;
 
-    string correctUsage =
-                    "Usage: --file <recipientName> <localPath> [-r remoteFilename] [-s saveLocation]\n" +
-                    "   or: --file <localPath> [-r remoteFilename] [-s saveLocation]   (sends to Server)";
+                    string correctUsage =
+                                    "Usage: --file <recipientName> <localPath> [-r remoteFilename] [-s saveLocation]\n" +
+                                    "   or: --file <localPath> [-r remoteFilename] [-s saveLocation]   (sends to Server)";
 
-    if (args.Length < 1) {
-        Notification?.Invoke(NotificationType.Info, correctUsage);
-        return;
-    }
+                    if (args.Length < 1) {
+                        Notification?.Invoke(NotificationType.Info, correctUsage);
+                        return;
+                    }
 
-    var positional = new List<string>();
+                    var positional = new List<string>();
 
-    for (int i = 0; i < args.Length; i++) {
-        try {
-            if (args[i] == "-r") {
-                if (i + 1 >= args.Length) {
-                    Notification?.Invoke(NotificationType.Info, correctUsage);
+                    for (int i = 0; i < args.Length; i++) {
+                        try {
+                            if (args[i] == "-r") {
+                                if (i + 1 >= args.Length) {
+                                    Notification?.Invoke(NotificationType.Info, correctUsage);
+                                    return;
+                                }
+                                if (args[i + 1].IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || string.IsNullOrWhiteSpace(args[i + 1])) {
+                                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid filename");
+                                    return;
+                                }
+                                remoteFilename = args[i + 1];
+                                i++;
+                                continue;
+                            }
+                            if (args[i] == "-s") {
+                                if (i + 1 >= args.Length) {
+                                    Notification?.Invoke(NotificationType.Info, correctUsage);
+                                    return;
+                                }
+                                if (args[i + 1].IndexOfAny(Path.GetInvalidPathChars()) >= 0 || string.IsNullOrWhiteSpace(args[i + 1])) {
+                                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid path");
+                                    return;
+                                }
+                                saveLocation = args[i + 1];
+                                i++;
+                                continue;
+                            }
+                            positional.Add(args[i]);
+                        }
+                        catch (IndexOutOfRangeException) {
+                            Notification?.Invoke(NotificationType.Info, correctUsage);
+                            return;
+                        }
+                    }
+
+                    if (positional.Count == 1) {
+                        // Backward-compatible form: --file <localPath> ...
+                        recipientName = "Server";
+                        localPath = positional[0];
+                    }
+                    else if (positional.Count == 2) {
+                        recipientName = positional[0];
+                        localPath = positional[1];
+                    }
+                    else {
+                        Notification?.Invoke(NotificationType.Info, correctUsage);
+                        return;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(Name)) {
+                        Notification?.Invoke(NotificationType.Error, "You must be logged in before sending files.");
+                        return;
+                    }
+
+                    await FileTransfer.SendFileAsync(_stream, localPath!, pendingResponses, Name!, recipientName!, remoteFilename, saveLocation, Notification);
                     return;
                 }
-                if (args[i + 1].IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || string.IsNullOrWhiteSpace(args[i + 1])) {
-                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid filename");
-                    return;
-                }
-                remoteFilename = args[i + 1];
-                i++;
-                continue;
-            }
-            if (args[i] == "-s") {
-                if (i + 1 >= args.Length) {
-                    Notification?.Invoke(NotificationType.Info, correctUsage);
-                    return;
-                }
-                if (args[i + 1].IndexOfAny(Path.GetInvalidPathChars()) >= 0 || string.IsNullOrWhiteSpace(args[i + 1])) {
-                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid path");
-                    return;
-                }
-                saveLocation = args[i + 1];
-                i++;
-                continue;
-            }
-
-            positional.Add(args[i]);
-        }
-        catch (IndexOutOfRangeException) {
-            Notification?.Invoke(NotificationType.Info, correctUsage);
-            return;
-        }
-    }
-
-    if (positional.Count == 1) {
-        // Backward-compatible form: --file <localPath> ...
-        recipientName = "Server";
-        localPath = positional[0];
-    }
-    else if (positional.Count == 2) {
-        recipientName = positional[0];
-        localPath = positional[1];
-    }
-    else {
-        Notification?.Invoke(NotificationType.Info, correctUsage);
-        return;
-    }
-
-    if (string.IsNullOrWhiteSpace(Name)) {
-        Notification?.Invoke(NotificationType.Error, "You must be logged in before sending files.");
-        return;
-    }
-
-    await FileTransfer.SendFileAsync(_stream, localPath!, pendingResponses, Name!, recipientName!, remoteFilename, saveLocation, Notification);
-    return;
-}
-case "voice":
+            case "voice":
                 var invitees = args;
                 if (invitees.Length == 0) {
                     invitees = new[] { "Server" };
@@ -431,9 +417,13 @@ case "voice":
         }
     }
 
+    // === Guard Methods ===
+    public Stream StreamOrThrow() => _stream ?? throw new InvalidOperationException("Not connected. Call ConnectAsync first.");
+    public string NameOrThrow() => Name ?? throw new InvalidOperationException("Not logged in. Call LoginAsync first.");
+
     // === IDisposable Implementation ===
     public async ValueTask DisposeAsync() {
-        try { _stream?.Dispose(); } catch { }
+        try { _stream?.DisposeAsync(); } catch { /* ignore */ }
     }
 
 }
