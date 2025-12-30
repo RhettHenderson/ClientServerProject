@@ -115,12 +115,28 @@ public class Client : IAsyncDisposable {
                 if (status == PacketStatus.Ok && packet != null) {
                     var headers = packet.Headers;
                     var text = Encoding.UTF8.GetString(packet.Payload);
-                    var type = headers["Type"];
 
-                    if (pendingResponses.TryRemove(type, out var tcs)) {
-                        tcs.TrySetResult(packet);
-                        continue;
-                    }
+var type = headers["Type"];
+
+// First, try file-correlated pending responses (prevents collisions for concurrent transfers).
+if (type == "FileStartAck"
+    && headers.TryGetValue("ClientNonce", out var nonce)
+    && pendingResponses.TryRemove($"FileStartAck:{nonce}", out var tcsStart)) {
+    tcsStart.TrySetResult(packet);
+    continue;
+}
+if (type == "FileEndAck"
+    && headers.TryGetValue("TransferId", out var tid)
+    && pendingResponses.TryRemove($"FileEndAck:{tid}", out var tcsEnd)) {
+    tcsEnd.TrySetResult(packet);
+    continue;
+}
+
+// Fallback: type-based correlation (AuthStatus, etc.)
+if (pendingResponses.TryRemove(type, out var tcs)) {
+    tcs.TrySetResult(packet);
+    continue;
+}
 
                     switch (type) {
                         case ("Message"):
@@ -273,7 +289,8 @@ public class Client : IAsyncDisposable {
             Payload = Encoding.UTF8.GetBytes(userAuthCode)
         };
 
-        Packet response = await PacketIO.SendAndWaitAsync(stream, authCode, "AuthStatus", pendingResponses);
+        var response = await PacketIO.SendAndWaitAsync(stream, authCode, "AuthStatus", pendingResponses);
+        if (response == null) return false;
         var payload = Encoding.UTF8.GetString(response.Payload);
         if (payload == "Success") {
             Packet makeNewUser = new Packet {
@@ -282,6 +299,7 @@ public class Client : IAsyncDisposable {
                 Payload = Array.Empty<byte>()
             };
             response = await PacketIO.SendAndWaitAsync(stream, makeNewUser, "AuthStatus", pendingResponses);
+            if (response == null) return false;
             payload = Encoding.UTF8.GetString(response.Payload);
 
             switch (payload) {
@@ -306,61 +324,85 @@ public class Client : IAsyncDisposable {
         var cmd = parts[0];
         var args = parts.Skip(1).ToArray();
         switch (cmd) {
-            case "file":
-                string? localPath = null;
-                string? remoteFilename = null;
-                string? saveLocation = null;
-                string correctUsage = "Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]";
-                if (args.Length < 1 || args.Length > 5) {
+            case "file": {
+    if (_stream is null) throw new InvalidOperationException("Not connected.");
+
+    string? recipientName = null;
+    string? localPath = null;
+    string? remoteFilename = null;
+    string? saveLocation = null;
+
+    string correctUsage =
+                    "Usage: --file <recipientName> <localPath> [-r remoteFilename] [-s saveLocation]\n" +
+                    "   or: --file <localPath> [-r remoteFilename] [-s saveLocation]   (sends to Server)";
+
+    if (args.Length < 1) {
+        Notification?.Invoke(NotificationType.Info, correctUsage);
+        return;
+    }
+
+    var positional = new List<string>();
+
+    for (int i = 0; i < args.Length; i++) {
+        try {
+            if (args[i] == "-r") {
+                if (i + 1 >= args.Length) {
                     Notification?.Invoke(NotificationType.Info, correctUsage);
                     return;
                 }
-                else {
-                    for (int i = 0; i < args.Length; i++) {
-                        try {
-                            if (i == 0) {
-                                localPath = args[i];
-                            }
-                            else if (args[i] == "-r") {
-                                //This check will return the first index of any invalid characters
-                                if (args[i + 1].IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) {
-                                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid filename");
-                                    return;
-                                }
-                                if (String.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1] == "-s") {
-                                    Notification?.Invoke(NotificationType.Info, correctUsage);
-                                    return;
-                                }
-                                remoteFilename = args[i + 1];
-                                //Skip the next element since we handled it here
-                                i++;
-                                continue;
-                            }
-                            else if (args[i] == "-s") {
-                                //Same error checking as above
-                                if (args[i + 1].IndexOfAny(Path.GetInvalidPathChars()) >= 0) {
-                                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid path");
-                                    return;
-                                }
-                                if (String.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1] == "-r") {
-                                    Notification?.Invoke(NotificationType.Info, correctUsage);
-                                    return;
-                                }
-                                saveLocation = args[i + 1];
-                                i++;
-                                continue;
-                            }
-                        }
-                        //catches the case that the user specified a -r or -s option without an argument following
-                        catch (IndexOutOfRangeException e) {
-                            Notification?.Invoke(NotificationType.Info, correctUsage);
-                            return;
-                        }
-                    }
-                    await FileTransfer.SendFileAsync(_stream, localPath!, pendingResponses, remoteFilename, saveLocation);
+                if (args[i + 1].IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || string.IsNullOrWhiteSpace(args[i + 1])) {
+                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid filename");
                     return;
                 }
-            case "voice":
+                remoteFilename = args[i + 1];
+                i++;
+                continue;
+            }
+            if (args[i] == "-s") {
+                if (i + 1 >= args.Length) {
+                    Notification?.Invoke(NotificationType.Info, correctUsage);
+                    return;
+                }
+                if (args[i + 1].IndexOfAny(Path.GetInvalidPathChars()) >= 0 || string.IsNullOrWhiteSpace(args[i + 1])) {
+                    Notification?.Invoke(NotificationType.Warning, "Please enter a valid path");
+                    return;
+                }
+                saveLocation = args[i + 1];
+                i++;
+                continue;
+            }
+
+            positional.Add(args[i]);
+        }
+        catch (IndexOutOfRangeException) {
+            Notification?.Invoke(NotificationType.Info, correctUsage);
+            return;
+        }
+    }
+
+    if (positional.Count == 1) {
+        // Backward-compatible form: --file <localPath> ...
+        recipientName = "Server";
+        localPath = positional[0];
+    }
+    else if (positional.Count == 2) {
+        recipientName = positional[0];
+        localPath = positional[1];
+    }
+    else {
+        Notification?.Invoke(NotificationType.Info, correctUsage);
+        return;
+    }
+
+    if (string.IsNullOrWhiteSpace(Name)) {
+        Notification?.Invoke(NotificationType.Error, "You must be logged in before sending files.");
+        return;
+    }
+
+    await FileTransfer.SendFileAsync(_stream, localPath!, pendingResponses, Name!, recipientName!, remoteFilename, saveLocation, Notification);
+    return;
+}
+case "voice":
                 var invitees = args;
                 if (invitees.Length == 0) {
                     invitees = new[] { "Server" };

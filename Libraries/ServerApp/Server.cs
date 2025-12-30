@@ -30,7 +30,8 @@ public class Server : IAsyncDisposable {
     // === Active Clients & State ===
     private static readonly ConcurrentDictionary<int, Conn> clients = new();               // ID -> connection
     private static readonly ConcurrentDictionary<string, int> names = new();               // username -> ID
-    private static readonly ConcurrentDictionary<string, FileReceiveState> files = new();  // fileKey -> state
+    private static readonly ConcurrentDictionary<string, FileReceiveState> files = new();  // transferId -> state (only used when the Server is the recipient)
+    private static readonly ConcurrentDictionary<string, (int senderId, int recipientId)> fileRoutes = new();  // transferId -> (senderId, recipientId); recipientId == -1 => Server
     private static readonly ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses = new(); // expectedType -> TaskCompletionSource
     internal readonly ConcurrentDictionary<int, string> clientPlatforms = new(); // ID -> platform name
     private int reconnectingID = 0;
@@ -210,12 +211,27 @@ public class Server : IAsyncDisposable {
         //Types so far are "Message", "Command", "Ack", "Data"
         var type = headers["Type"];
 
+
         //Before actually processing the packet, check pendingResponses
-        if (pendingResponses.TryRemove(type, out var tcs)) {
-            tcs.SetResult(incoming);
+        // (Use correlation keys for file acks so we don't swallow relayed acks meant for other clients.)
+        if (type == "FileStartAck"
+            && headers.TryGetValue("ClientNonce", out var nonce)
+            && pendingResponses.TryRemove($"FileStartAck:{nonce}", out var tcsStart)) {
+            tcsStart.TrySetResult(incoming);
+            return true;
+        }
+        if (type == "FileEndAck"
+            && headers.TryGetValue("TransferId", out var tid)
+            && pendingResponses.TryRemove($"FileEndAck:{tid}", out var tcsEnd)) {
+            tcsEnd.TrySetResult(incoming);
             return true;
         }
 
+        // Non-file responses can still use type-based correlation.
+        if (type != "FileStartAck" && type != "FileEndAck" && pendingResponses.TryRemove(type, out var tcs)) {
+            tcs.TrySetResult(incoming);
+            return true;
+        }
         switch (type) {
             case ("Message"):
                 MessageReceived?.Invoke(clientID, text);
@@ -408,28 +424,112 @@ public class Server : IAsyncDisposable {
                 }
                 await PacketIO.SendPacketAsync(conn.io, reply);
                 return true;
-            case "FileStart":
-                await FileTransfer.HandleFileStartAsync(conn.io, incoming, files, Name, defaultSaveDir);
-                Notification?.Invoke(NotificationType.Info, "Received FileStart packet");
-                return true;
-            case "FileChunk":
-                await FileTransfer.HandleFileChunkAsync(incoming, files);
 
-                //Progress logging
-                if (incoming.Headers.TryGetValue("FileKey", out var key) && files.TryGetValue(key, out var state)) {
-                    int index = int.Parse(incoming.Headers["Index"]);
-                    int currentChunk = index + 1;
-                    int totalChunks = state.ExpectedChunks;
+            case "FileStart": {
+                    // Client -> Server -> Recipient
+                    var recipientName = (headers.TryGetValue("Recipient", out var r) && !string.IsNullOrWhiteSpace(r)) ? r : "Server";
+                    var transferId = Guid.NewGuid().ToString("N");
 
-                    double percent = (double)currentChunk / totalChunks * 100.0;
-                    string bar = BuildProgessBar(percent, width: 40);
-                    Notification?.Invoke(NotificationType.Info, $"[PROGRESS]{bar}, chunk {currentChunk}/{totalChunks}");
+                    // Stamp a TransferId so all subsequent packets can be routed.
+                    headers["TransferId"] = transferId;
+                    headers["Sender"] = clientID;
+                    headers["Recipient"] = recipientName;
+
+                    int recipientId = -1; // -1 means Server is recipient
+                    if (!recipientName.Equals("Server", StringComparison.OrdinalIgnoreCase)) {
+                        if (!names.TryGetValue(recipientName, out recipientId) || !clients.ContainsKey(recipientId)) {
+                            // Recipient not connected; fail fast so sender unblocks.
+                            var failAck = new Packet {
+                                ClientID = "Server",
+                                Headers = new Dictionary<string, string> {
+                        { "Type", "FileStartAck" },
+                        { "Status", "RecipientOffline" },
+                        { "TransferId", transferId }
+                    },
+                                Payload = Array.Empty<byte>()
+                            };
+                            if (headers.TryGetValue("ClientNonce", out var clientNonce) && !string.IsNullOrWhiteSpace(clientNonce)) {
+                                failAck.Headers["ClientNonce"] = clientNonce;
+                            }
+                            await PacketIO.SendPacketAsync(conn.io, failAck);
+                            return true;
+                        }
+                    }
+
+                    fileRoutes[transferId] = (id, recipientId);
+
+                    if (recipientId == -1) {
+                        // Server is the recipient (store on server).
+                        await FileTransfer.HandleFileStartAsync(conn.io, incoming, files, Name, defaultSaveDir);
+                        if (!files.ContainsKey(transferId)) {
+                            fileRoutes.TryRemove(transferId, out _);
+                        }
+                        return true;
+                    }
+
+                    // Forward to recipient client.
+                    await PacketIO.SendPacketAsync(clients[recipientId].io, incoming);
+                    return true;
                 }
-                return true;
-            case "FileEnd":
-                await FileTransfer.HandleFileEndAsync(conn.io, incoming, files, Name);
-                Notification?.Invoke(NotificationType.Info, "Received FileEnd packet");
-                return true;
+            case "FileStartAck": {
+                    if (!headers.TryGetValue("TransferId", out var transferId) || string.IsNullOrWhiteSpace(transferId)) {
+                        return true;
+                    }
+                    if (fileRoutes.TryGetValue(transferId, out var route) && clients.TryGetValue(route.senderId, out var senderConn)) {
+                        await PacketIO.SendPacketAsync(senderConn.io, incoming);
+                    }
+                    if (headers.TryGetValue("Status", out var st) && !st.Equals("Ok", StringComparison.OrdinalIgnoreCase)) {
+                        fileRoutes.TryRemove(transferId, out _);
+                    }
+                    return true;
+                }
+            case "FileChunk": {
+                    if (!headers.TryGetValue("TransferId", out var transferId) || string.IsNullOrWhiteSpace(transferId)) {
+                        return true;
+                    }
+                    if (!fileRoutes.TryGetValue(transferId, out var route)) {
+                        return true;
+                    }
+
+                    if (route.recipientId == -1) {
+                        await FileTransfer.HandleFileChunkAsync(incoming, files);
+                        return true;
+                    }
+
+                    if (clients.TryGetValue(route.recipientId, out var rcptConn)) {
+                        await PacketIO.SendPacketAsync(rcptConn.io, incoming);
+                    }
+                    return true;
+                }
+            case "FileEnd": {
+                    if (!headers.TryGetValue("TransferId", out var transferId) || string.IsNullOrWhiteSpace(transferId)) {
+                        return true;
+                    }
+                    if (!fileRoutes.TryGetValue(transferId, out var route)) {
+                        return true;
+                    }
+
+                    if (route.recipientId == -1) {
+                        await FileTransfer.HandleFileEndAsync(conn.io, incoming, files, Name);
+                        fileRoutes.TryRemove(transferId, out _);
+                        return true;
+                    }
+
+                    if (clients.TryGetValue(route.recipientId, out var rcptConn)) {
+                        await PacketIO.SendPacketAsync(rcptConn.io, incoming);
+                    }
+                    return true;
+                }
+            case "FileEndAck": {
+                    if (!headers.TryGetValue("TransferId", out var transferId) || string.IsNullOrWhiteSpace(transferId)) {
+                        return true;
+                    }
+                    if (fileRoutes.TryGetValue(transferId, out var route) && clients.TryGetValue(route.senderId, out var senderConn)) {
+                        await PacketIO.SendPacketAsync(senderConn.io, incoming);
+                    }
+                    fileRoutes.TryRemove(transferId, out _);
+                    return true;
+                }
             case "Disconnect":
                 Notification?.Invoke(NotificationType.Warning, $"Client {clientID} requested UDP disconnect.");
                 vc.CloseUdpConnection();
@@ -542,12 +642,9 @@ public class Server : IAsyncDisposable {
                 defaultSaveDir = dir;
                 Notification?.Invoke(NotificationType.Info, $"Default save directory set to {defaultSaveDir}");
                 return;
+
             case "file":
-                if (args.Length != 1) {
-                    Notification?.Invoke(NotificationType.Info, "Usage: --file <localPath> [-r remoteFilename] [-s saveLocation]");
-                    return;
-                }
-                await FileTransfer.SendFileAsync(_stream, args[0], pendingResponses);
+                Notification?.Invoke(NotificationType.Info, "Server-side --file is currently disabled. Send files from a client (client -> server -> other client).");
                 return;
             case "accept":
                 await vc.AcceptInvite();

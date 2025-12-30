@@ -2,11 +2,9 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
-using System.Security.Cryptography;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
-using OpenTK.Audio.OpenAL;
 
 namespace Common;
 
@@ -19,6 +17,9 @@ public static class PacketIO {
     private static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<Packet> PacketInfo = CommonJsonContext.Default.Packet;
     private static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<Dictionary<string, string>> DictInfo = CommonJsonContext.Default.DictionaryStringString;
     private static readonly System.Text.Json.Serialization.Metadata.JsonTypeInfo<string[]> StringArrayInfo = CommonJsonContext.Default.StringArray;
+
+    // Serialize all writes per Stream to prevent "another write operation is in progress" exceptions.
+    private static readonly ConditionalWeakTable<Stream, SemaphoreSlim> _streamWriteLocks = new();
 
     public static byte[] Serialize(Packet packet) => JsonSerializer.SerializeToUtf8Bytes(packet, PacketInfo);
     public static byte[] SerializeForUdp(Packet packet) {
@@ -121,12 +122,21 @@ public static class PacketIO {
     }
 
     public static async Task SendPacketAsync(Stream stream, Packet packet) {
-        byte[] body = Serialize(packet);
-        byte[] len = new byte[4];
-        BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
+        var gate = await GetWriteLock(stream);
+        await gate.WaitAsync().ConfigureAwait(false);
+        try {
+            byte[] body = Serialize(packet);
+            byte[] len = new byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
 
-        await stream.WriteAsync(len);
-        await stream.WriteAsync(body);
+            await stream.WriteAsync(len);
+            await stream.WriteAsync(body);
+            try { await stream.FlushAsync(); } catch { /* ignore */}
+        }
+        finally {
+            gate.Release();
+        }
+
     }
     public static async Task<(PacketStatus status, Packet packet)> ReceivePacketAsync(Stream stream) {
         byte[] lenBuf = new byte[4];
@@ -165,16 +175,35 @@ public static class PacketIO {
         return 0;
     }
 
-    public static async Task<Packet> SendAndWaitAsync(Stream stream, Packet packet, string expectedType, ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses) {
+    public static async Task<Packet?> SendAndWaitAsync(Stream stream, Packet packet, string expectedType, ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses) {
+        // Backward-compatible overload: expectedType is used as the pendingResponses key.
+        return await SendAndWaitAsync(stream, packet, expectedKey: expectedType, pendingResponses: pendingResponses, timeout: TimeSpan.FromSeconds(10));
+    }
+
+    public static async Task<Packet?> SendAndWaitAsync(
+        Stream stream,
+        Packet packet,
+        string expectedKey,
+        ConcurrentDictionary<string, TaskCompletionSource<Packet>> pendingResponses,
+        TimeSpan? timeout
+    ) {
         var tcs = new TaskCompletionSource<Packet>(TaskCreationOptions.RunContinuationsAsynchronously);
-        pendingResponses[expectedType] = tcs;
+        pendingResponses[expectedKey] = tcs;
 
         await SendPacketAsync(stream, packet);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cts = timeout.HasValue ? new CancellationTokenSource(timeout.Value) : new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using (cts.Token.Register(() => tcs.TrySetCanceled())) {
-            return await tcs.Task;
+            try {
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) {
+                pendingResponses.TryRemove(expectedKey, out _);
+                return null;
+            }
         }
     }
+
+    private static async Task<SemaphoreSlim> GetWriteLock(Stream stream) => _streamWriteLocks.GetValue(stream, _ => new SemaphoreSlim(1, 1));
 
 }
