@@ -11,7 +11,7 @@ class Program {
     static async Task Main(string[] args) {
         // === Connection Setup ===
         Console.Write("Enter server host or press Enter for this device's IP: ");
-        string host = Console.ReadLine();
+        var host = Console.ReadLine();
         if (string.IsNullOrWhiteSpace(host)) {
             host = GetLocalIP();
         }
@@ -50,7 +50,7 @@ class Program {
 
         await client.LoginAsync(username, password);
 
-        Console.Title = client.Name;
+        Console.Title = client.NameOrThrow();
 
         while (true) {
             var line = Console.ReadLine();
@@ -93,7 +93,6 @@ class Program {
         client.MessageReceived += (sender, msg) => Console.WriteLine($"{sender}: {msg}");
         client.WhisperReceived += (from, msg) => Console.WriteLine($"(Whisper) {from}: {msg}");
         client.IdAssigned += id => Console.Title = $"Client {id}";
-        client.CommandsReceived += cmds => Console.WriteLine("Received commands list.");
         client.Error += msg => {
             Console.WriteLine($"\n\nError: {msg} Press any key to exit...");
             Console.ReadKey();
