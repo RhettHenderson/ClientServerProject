@@ -85,7 +85,9 @@
 
                     <ListBox x:Name="UsersListBox"
                              DisplayMemberPath="DisplayName"
-                             SelectionChanged="UsersListBox_SelectionChanged"/>
+                             SelectionChanged="UsersListBox_SelectionChanged"
+                             PreviewMouseRightButtonUp="UsersListBox_PreviewMouseRightButtonUp"/>
+
                 </DockPanel>
             </Border>
 
@@ -100,8 +102,41 @@
                 <!-- Header -->
                 <StackPanel Grid.Row="0" Margin="0,0,0,10">
                     <TextBlock x:Name="HeaderText" FontSize="14"/>
-                    <TextBlock x:Name="ConversationText" Opacity="0.75"/>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock x:Name="ConversationText"
+                   Opacity="0.75"
+                   VerticalAlignment="Center"/>
+
+                        <StackPanel Grid.Column="1"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center">
+                            <!-- Calls everyone in the Room (or the whisper target) -->
+                            <Button x:Name="VoiceButton"
+                    Width="32" Height="28"
+                    Margin="0,0,6,0"
+                    ToolTip="Voice call"
+                    Click="VoiceButton_Click">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE717;"/>
+                            </Button>
+
+                            <!-- Room-only: calls only the server -->
+                            <Button x:Name="VoiceServerButton"
+                    Width="32" Height="28"
+                    ToolTip="Call server"
+                    Click="VoiceServerButton_Click">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8A7;"/>
+                            </Button>
+                        </StackPanel>
+                    </Grid>
                 </StackPanel>
+
 
                 <!-- Past messages (scrolling automatically) -->
                 <ListBox x:Name="MessagesListBox"

@@ -6,6 +6,8 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 
 namespace ClientGUI;
 
@@ -47,6 +49,11 @@ public partial class ChatWindow : Window {
                 MessageBox.Show(this, msg, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             });
         };
+        _client.Notification += (type, msg) => {
+            Dispatcher.BeginInvoke(() => {
+                AddToHistory(RoomKey, $"[Notification]: {msg}");
+            });
+        };
 
         // Users list UI
         UsersListBox.ItemsSource = _users;
@@ -69,6 +76,48 @@ public partial class ChatWindow : Window {
 
         SwitchConversation(item.Key);
     }
+
+    private void UsersListBox_PreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e) {
+        var dep = e.OriginalSource as DependencyObject;
+        while (dep != null && dep is not ListBoxItem) {
+            dep = VisualTreeHelper.GetParent(dep);
+        }
+
+        if (dep is not ListBoxItem lbi || lbi.DataContext is not UserListItem item) {
+            return;
+        }
+
+        UsersListBox.SelectedItem = item;
+        ShowUserContextMenu(item, lbi);
+        e.Handled = true;
+    }
+
+    private void ShowUserContextMenu(UserListItem item, FrameworkElement placementTarget) {
+        var menu = new ContextMenu();
+
+        if (item.IsRoom) {
+            var callRoom = new MenuItem { Header = "Call Room (Voice)" };
+            callRoom.Click += async (_, _) => await CallRoomVoiceAsync();
+            menu.Items.Add(callRoom);
+
+            var callServer = new MenuItem { Header = "Call Server (Voice)" };
+            callServer.Click += async (_, _) => await CallServerVoiceAsync();
+            menu.Items.Add(callServer);
+        }
+        else {
+            var callUser = new MenuItem { Header = $"Call {item.Key} (Voice)" };
+            callUser.Click += async (_, _) => await CallUserVoiceAsync(item.Key);
+            menu.Items.Add(callUser);
+        }
+
+        menu.Items.Add(new Separator());
+        menu.Items.Add(new MenuItem { Header = "More options coming...", IsEnabled = false });
+
+        placementTarget.ContextMenu = menu;
+        menu.PlacementTarget = placementTarget;
+        menu.IsOpen = true;
+    }
+
 
     private void SwitchConversation(string key) {
         _activeConversationKey = key;
@@ -185,6 +234,55 @@ public partial class ChatWindow : Window {
         Dispatcher.BeginInvoke(() => {
             AddToHistory(RoomKey, $"{sender}: {text}");
         });
+    }
+
+    private async void VoiceButton_Click(object sender, RoutedEventArgs e) {
+        try {
+            if (_activeConversationKey == RoomKey) {
+                await CallRoomVoiceAsync();
+            }
+            else {
+                await CallUserVoiceAsync(_activeConversationKey);
+            }
+        }
+        catch (Exception ex) {
+            AddToHistory(RoomKey, $"(voice) Error: {ex.Message}");
+        }
+    }
+
+    private async void VoiceServerButton_Click(object sender, RoutedEventArgs e) {
+        try {
+            await CallServerVoiceAsync();
+        }
+        catch (Exception ex) {
+            AddToHistory(RoomKey, $"(voice) Error: {ex.Message}");
+        }
+    }
+
+    private async Task CallRoomVoiceAsync() {
+        var invitees = _client.ConnectedClients
+            .Where(ci => ci != null && !string.IsNullOrWhiteSpace(ci.Name))
+            .Select(ci => ci.Name)
+            .Where(n => !string.Equals(n, _client.Name, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        invitees.Add("Server");
+
+        AddToHistory(RoomKey, "(voice) Starting Room call...");
+        await _client.StartVoiceRoom(invitees);
+    }
+
+    private async Task CallServerVoiceAsync() {
+        AddToHistory(RoomKey, "(voice) Calling server...");
+        await _client.StartVoiceRoom(new[] { "Server" });
+    }
+
+    private async Task CallUserVoiceAsync(string targetUser) {
+        EnsureUserExists(targetUser);
+        AddToHistory(targetUser, $"(voice) Calling {targetUser}...");
+        await _client.StartVoiceRoom(new[] { targetUser });
+        BumpUserToTop(targetUser);
     }
 
     private void Client_WhisperReceived(string sender, string text) {
