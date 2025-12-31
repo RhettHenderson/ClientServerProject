@@ -87,11 +87,9 @@ public partial class ChatWindow : Window {
 
         // Attachments only allowed in Room for now (client -> server)
         bool inRoom = (key == RoomKey);
-        AttachButton.Opacity = inRoom ? 1.0 : 0.55;
         AttachButton.ToolTip = inRoom
             ? "Attach a file (sends to server)"
-            : "Attachments are only supported in Room for now";
-        AttachButton.IsEnabled = inRoom;
+            : $"Attach a file (sends to {key}";
         //Remove attachment if switching out of room
         if (!inRoom)
             RemoveAttachment_Click(this, new RoutedEventArgs());
@@ -143,16 +141,22 @@ public partial class ChatWindow : Window {
         // If a file is attached, send it
         if (hasAttachment && !string.IsNullOrWhiteSpace(attachmentPath)) {
             if (_activeConversationKey == RoomKey) {
-                // Current implementation: client -> server file transfer (kept the same)
-                await FileTransfer.SendFileAsync(_client._stream, attachmentPath, _client.pendingResponses);
+                var ok = await FileTransfer.SendFileAsync(_client.StreamOrThrow(), attachmentPath, _client.pendingResponses, _client.NameOrThrow(), "Server");
+                AddToHistory(RoomKey, ok
+                    ? $"(file) You: {Path.GetFileName(attachmentPath)}"
+                    : $"(file) Failed to send: {Path.GetFileName(attachmentPath)}");
 
-                AddToHistory(RoomKey, $"(file) You: {Path.GetFileName(attachmentPath)}");
-
-                // clear attachment state
                 RemoveAttachment_Click(this, new RoutedEventArgs());
             }
             else {
-                // TODO: client-to-client file sending not implemented yet.
+                string targetUser = _activeConversationKey;
+                var ok = await FileTransfer.SendFileAsync(_client.StreamOrThrow(), attachmentPath, _client.pendingResponses, _client.NameOrThrow(), _activeConversationKey);
+                AddToHistory(targetUser, ok
+                    ? $"(file) You: {Path.GetFileName(attachmentPath)}"
+                    : $"(file) Failed to send: {Path.GetFileName(attachmentPath)}");
+
+                if (ok) BumpUserToTop(targetUser);
+                RemoveAttachment_Click(this, new RoutedEventArgs());
             }
         }
 
