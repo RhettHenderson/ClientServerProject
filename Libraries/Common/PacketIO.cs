@@ -131,9 +131,13 @@ public static class PacketIO {
             byte[] body = Serialize(packet);
             byte[] len = new byte[4];
             BinaryPrimitives.WriteInt32BigEndian(len, body.Length);
-
-            await stream.WriteAsync(len);
-            await stream.WriteAsync(body);
+            try {
+                await stream.WriteAsync(len);
+                await stream.WriteAsync(body);
+            }
+            catch {
+                throw new InvalidOperationException("Stream is closed. Server likely disconnected.");
+            }
             try { await stream.FlushAsync(); } catch { /* ignore */}
         }
         finally {
