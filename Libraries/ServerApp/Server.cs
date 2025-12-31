@@ -56,7 +56,11 @@ public class Server : IAsyncDisposable {
     public event Action<NotificationType, string>? Notification;
     public event Action<string, string>? MessageReceived;    // (from, text)
 
-    public void Initialize(int port, string ip = "127.0.0.1") {
+    public void Initialize(int port) {
+        Initialize(port, GetLocalIP());
+    }
+
+    public void Initialize(int port, string ip) {
         listeningPort = port;
         Console.Title = "Server";
         IPAddress ipAddr;
